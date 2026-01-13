@@ -10,19 +10,15 @@ BufferShort::~BufferShort()
     std::free(data);
 }
 
-short *BufferShort::GetWriteBuffer(int Size,  int &ExtraAtEnd) //if at End you need to copy ExtraAtEnd at the Start
+short *BufferShort::GetWriteBuffer(int Size) //if at End you need to copy ExtraAtEnd at the Start
 {
-    ExtraAtEnd = 0;
-    int PtrEnd = PtrWr + Size;
-    if((PtrEnd) > BufferSize)
-    {
-        ExtraAtEnd = PtrEnd - BufferSize;
-    }
+   
     short *RetVal = data + PtrWr;
     return RetVal;
 }
-short * BufferShort::GetReadBuffer(int Size, int &ExtraAtEnd)
+short * BufferShort::GetReadBuffer(int Size)
 {
+    int ExtraAtEnd;
     short *RetVal = 0;
     int Delta = PtrWr - PtrRd;
     if(Delta >= 0)
@@ -40,6 +36,7 @@ short * BufferShort::GetReadBuffer(int Size, int &ExtraAtEnd)
         if(ExtraAtEnd > 0)
         {
             ExtraAtEnd = (PtrRd+Size) & Mask;
+            std::copy(data,data+ExtraAtEnd,data+BufferSize);
         }
     }
 
@@ -48,6 +45,11 @@ short * BufferShort::GetReadBuffer(int Size, int &ExtraAtEnd)
 void BufferShort::AdvancePtrWr(int Advance)
 {
     int NewPtrWr = PtrWr + Advance;
+    if((NewPtrWr) > BufferSize)
+    {
+        std::copy(data + BufferSize,data + NewPtrWr,data);//copy the end to the beggining
+    }
+
     NewPtrWr &= Mask;
     PtrWr = NewPtrWr;
 

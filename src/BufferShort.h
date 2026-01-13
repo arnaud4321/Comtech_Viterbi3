@@ -17,8 +17,8 @@ private:
 public:
     BufferShort(int BufferSize, int ExtraBufferSize);
     ~BufferShort();
-    short * GetWriteBuffer(int Size, int &ExtraAtEnd);
-    short * GetReadBuffer(int Size,  int &ExtraAtEnd);
+    short * GetWriteBuffer(int Size);
+    short * GetReadBuffer(int Size);
     short *GetBufferStart(void)
     {
         return data;
