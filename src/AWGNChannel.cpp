@@ -150,7 +150,7 @@ void AWGNChannel::GenerateOutput(void)
             PtrOut += 16;
         }
         NumSamples += PtrOut;
-                cout<<"AWGN "<<NumSamples<<" "<<Output[0]<<" "<<Output[1]<<endl;
+        //        cout<<"AWGN "<<NumSamples<<" "<<Output[0]<<" "<<Output[1]<<endl;
 
  # ifdef DEBUG_AWGN
         std::copy(Output,Output+TxOutputBatchSize,OutAllI+PtrOutAll);
