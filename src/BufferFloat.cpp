@@ -48,7 +48,7 @@ void BufferFloat::GetReadBuffer(float * &OutI, float * &OutQ, int Size)
             int PtrEnd = PtrRd + Size;
             if(PtrEnd > BufferSize)
             {
-                ExtraAtEnd = (PtrRd - BufferSize) ;
+                ExtraAtEnd = (PtrEnd - BufferSize) ;
                 std::copy(datai,datai+ExtraAtEnd,datai+BufferSize);
                 std::copy(dataq,dataq+ExtraAtEnd,dataq+BufferSize);
             }
@@ -58,11 +58,15 @@ void BufferFloat::GetReadBuffer(float * &OutI, float * &OutQ, int Size)
 
 void BufferFloat::AdvancePtrWr(int Advance)
 {
-    int NewPtrWr = PtrWr + Advance;
+    int NewPtrWr = PtrWr;
+    NewPtrWr += Advance;
     if((NewPtrWr) >= BufferSize)
     {
-        std::copy(datai + BufferSize,datai + NewPtrWr,datai);//copy the end to the beggining
-        std::copy(dataq + BufferSize,dataq + NewPtrWr,dataq);//copy the end to the beggining
+        if(NewPtrWr > BufferSize)
+        {
+            std::copy(datai + BufferSize,datai + NewPtrWr,datai);//copy the end to the beggining
+            std::copy(dataq + BufferSize,dataq + NewPtrWr,dataq);//copy the end to the beggining
+        }
         NewPtrWr -= BufferSize;
     }    
     PtrWr = NewPtrWr;
@@ -71,7 +75,8 @@ void BufferFloat::AdvancePtrWr(int Advance)
 
 void BufferFloat::AdvancePtrRd(int Advance)
 {
-    int NewPtrRd = PtrRd + Advance;
+    int NewPtrRd = PtrRd;
+    NewPtrRd += Advance;
     if((NewPtrRd) >= BufferSize)
     {
         NewPtrRd -= BufferSize;
