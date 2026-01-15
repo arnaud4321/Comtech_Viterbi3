@@ -2,6 +2,7 @@
 #include "cstdlib"
 #include <algorithm>    // std::copy
 #include "definitions.h"
+#include <immintrin.h>
 #include <iostream>
 using namespace std;
 //Everything is managed in shorts
@@ -11,6 +12,7 @@ private:
     /* data */
     
     int BufferSize;
+    int GuardSize;
     short *data = 0;
     int PtrWr = 0, PtrRd = 0, Mask;
     bool First = true;
@@ -39,9 +41,15 @@ public:
     {
         return PtrWr;
     }
+    int GetRdPtr(void)
+    {
+        return PtrRd;
+    }
     int GetBufferSize(void)
     {
         return BufferSize;
     }
+    bool AlmostFull(void);
+    int GetSizeInBuffer(void);
 };
 

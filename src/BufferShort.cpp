@@ -1,14 +1,17 @@
 #include "BufferShort.h"
-BufferShort::BufferShort(int BufferSize, int ExtraBufferSize)
+BufferShort::BufferShort(int BufferSizeIn, int ExtraBufferSize):BufferSize(BufferSizeIn)
 {
-    data = (short *)std::aligned_alloc(32, (BufferSize + ExtraBufferSize) * sizeof(short));
+    data = (short*) _mm_malloc( (BufferSize + ExtraBufferSize) * sizeof(short),32);
     Mask = BufferSize - 1;
+    GuardSize = BufferSize - (BufferSize>>3);
 }
 
 BufferShort::~BufferShort()
 {
-    std::free(data);
+   _mm_free(data);
 }
+
+
 
 short *BufferShort::GetWriteBuffer(int Size) //if at End you need to copy ExtraAtEnd at the Start
 {
@@ -16,28 +19,31 @@ short *BufferShort::GetWriteBuffer(int Size) //if at End you need to copy ExtraA
     short *RetVal = data + PtrWr;
     return RetVal;
 }
+
+int BufferShort::GetSizeInBuffer(void)
+{
+    int Delta = PtrWr - PtrRd;
+    if(Delta < 0)
+    {
+        Delta += BufferSize;
+    }
+    return Delta;
+}
+
 short * BufferShort::GetReadBuffer(int Size)
 {
     int ExtraAtEnd;
     short *RetVal = 0;
-    int Delta = PtrWr - PtrRd;
-    if(Delta >= 0)
-    {
-        ExtraAtEnd = 0;
-    }
-    else
-    {
-        Delta += BufferSize;
-        ExtraAtEnd = 1;
-    }
+    int Delta = GetSizeInBuffer();
     if(Delta >= Size)
     {
         RetVal = data + PtrRd;
-        if(ExtraAtEnd > 0)
+        int PtrEnd = PtrRd +Size;
+        if(PtrEnd > BufferSize) 
         {
-            ExtraAtEnd = (PtrRd+Size) & Mask;
+            ExtraAtEnd = PtrEnd - BufferSize;
             std::copy(data,data+ExtraAtEnd,data+BufferSize);
-        }
+        } 
     }
 
     return RetVal;
@@ -64,3 +70,14 @@ void BufferShort::AdvancePtrRd(int Advance)
     PtrRd = NewPtrRd;
 }
 
+bool BufferShort::AlmostFull()
+{
+    if(GetSizeInBuffer() >= GuardSize)
+    {
+        return true;
+    }
+    else 
+    {
+        return false;
+    }
+}
