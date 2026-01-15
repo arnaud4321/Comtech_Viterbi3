@@ -50,10 +50,12 @@ short * BufferShort::GetReadBuffer(int Size)
 }
 void BufferShort::AdvancePtrWr(int Advance)
 {
-    int NewPtrWr = PtrWr + Advance;
+    int NewPtrWr = PtrWr;
+    NewPtrWr += Advance;
     if((NewPtrWr) >= BufferSize)
     {
-        std::copy(data + BufferSize,data + NewPtrWr,data);//copy the end to the beggining
+        if(NewPtrWr > BufferSize)
+            std::copy(data + BufferSize,data + NewPtrWr,data);//copy the end to the beggining
         NewPtrWr -= BufferSize;
     }    
     PtrWr = NewPtrWr;
@@ -62,7 +64,8 @@ void BufferShort::AdvancePtrWr(int Advance)
 
 void BufferShort::AdvancePtrRd(int Advance)
 {
-    int NewPtrRd = PtrRd + Advance;
+    int NewPtrRd = PtrRd;
+    NewPtrRd += Advance;
     if((NewPtrRd) >= BufferSize)
     {
         NewPtrRd -= BufferSize;
