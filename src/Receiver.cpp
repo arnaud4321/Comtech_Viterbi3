@@ -2,21 +2,43 @@
 #include "Sampler.h"
 #include "definitions.h"
 #include <cstdio>
+#include <immintrin.h>
 #include <thread>
 Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB)
 {
     FilterInI = (float*) _mm_malloc(SPB*2*sizeof(float),32);
     FilterInQ = FilterInI + SPB;
+    OneSpsI = (float*) _mm_malloc(2*ReceiverInputBatchIQSymbols*sizeof(float),32);
+    OneSpsQ = OneSpsI + ReceiverInputBatchIQSymbols;
+    SplitI[0] = (float*) _mm_malloc(BatchSize3*sizeof(float),32);
+    SplitQ[0] = (float*) _mm_malloc(BatchSize3*sizeof(float),32);
+    Outputs[0] = (unsigned char*) _mm_malloc(BatchSize3,32);
+
+    for(int i = 1; i < 3; i++)
+    {
+        SplitI[i] = SplitI[i-1] + BatchSize1;
+        SplitQ[i] = SplitQ[i-1] + BatchSize1;
+        Outputs[i] = Outputs[i-1] + BatchSize1;
+    }
+
 
 #ifdef DEBUG1
     OutAllI = (float*) _mm_malloc( (NUM_SAMPLES_R1+100000)*sizeof(float),32);
     OutAllQ = (float*) _mm_malloc( (NUM_SAMPLES_R1+100000)*sizeof(float),32);
 #endif
+
+
+
 }
 
 Receiver::~Receiver()
 {
     _mm_free(FilterInI);
+    _mm_free(OneSpsI);
+    _mm_free(SplitI[0]);
+    _mm_free(SplitQ[0]);
+    
+
     #ifdef DEBUG1
         _mm_free(OutAllI);
         _mm_free(OutAllQ);
@@ -78,10 +100,23 @@ void Receiver::OperateFilter(void)
 
 void Receiver::OperateViterbi(void)
 {
+    bool First = true;
+    bool Calibrated = false;
     while(!StopAll)
     {
+        //4 options for Viterbi - taking also care of Spectrum Inversion
+        //(I+jQ)
+        //I-jQ
+        //j(I+jQ) = -Q+jI
+        //j(I-jQ)= Q+jI
+        //Controls:
+        //  false 1 1
+        //false 1 -1
+        //true -1 1
+        //true 1 1
+
         float *FilterOutI, *FilterOutQ;
-        oBufferFilter.GetReadBuffer(FilterOutI,FilterOutQ,BatchSize3*2);
+        oBufferFilter.GetReadBuffer(FilterOutI,FilterOutQ,ReceiverInputBatchIQSamples);
         while((FilterOutI == 0) && (StopAll == false))
         {
             std::mutex mtx;
@@ -107,12 +142,51 @@ void Receiver::OperateViterbi(void)
             exit(-1);
         }
         #endif
+
+
+        if(First)
+            First = false;
+        else
+        {
+            TakeEvenDebug(FilterOutI, OneSpsI, ReceiverInputBatchIQSamples);
+            TakeEvenDebug(FilterOutQ, OneSpsQ, ReceiverInputBatchIQSamples);
+            Split3(OneSpsI, OneSpsQ, ReceiverInputBatchIQSymbols);
+            float MetricsGrowth;
+            oViterbi.Decode(SplitI[0], SplitQ[0], ReceiverInputBatchIQSymbols, Outputs[0], false, 1, 1,MetricsGrowth );
+
+        }
         oBufferFilter.AdvancePtrRd(BatchSize3*2);
 
     }
 
 }
+void  Receiver::Split3(float *InputI, float *InputQ, int Length)
+{
+    __m256i mIndex[3];
+    mIndex[0] = _mm256_setr_epi32(0, 3, 6, 9, 12, 15, 18, 21);
+    mIndex[1] = _mm256_setr_epi32(1, 4, 7, 10, 13, 16, 19, 22);
+    mIndex[2] = _mm256_setr_epi32(2, 5, 8, 11, 14, 17, 20, 23);
+    //mIndex[3] = _mm256_set1_epi32(24);
+    int PtrOut = 0;
+    for(int i = 0; i<Length; i += 24)
+    {
+        __m256 I0 = _mm256_i32gather_ps(InputI + i,mIndex[0],4);
+        __m256 Q0 = _mm256_i32gather_ps(InputQ + i,mIndex[0],4);
+        __m256 I1 = _mm256_i32gather_ps(InputI + i,mIndex[1],4);
+        __m256 Q1 = _mm256_i32gather_ps(InputQ + i,mIndex[1],4);
+        __m256 I2 = _mm256_i32gather_ps(InputI + i,mIndex[2],4);
+        __m256 Q2 = _mm256_i32gather_ps(InputQ + i,mIndex[2],4);
+        _mm256_store_ps(SplitI[0]+PtrOut,I0);
+        _mm256_store_ps(SplitQ[0]+PtrOut,Q0);
+        _mm256_store_ps(SplitI[1]+PtrOut,I1);
+        _mm256_store_ps(SplitQ[1]+PtrOut,Q1);
+        _mm256_store_ps(SplitI[2]+PtrOut,I2);
+        _mm256_store_ps(SplitQ[2]+PtrOut,Q2);
+        PtrOut += 8;
+    }
 
+
+}
 void Receiver::shorts_to_floats_avx2(__m256i v16, __m256* out0, __m256* out1)
 {
     // Extract lower 128 bits (8 shorts)
@@ -135,4 +209,24 @@ void Receiver::shorts_to_floats_avx2(__m256i v16, __m256* out0, __m256* out1)
     // Convert int32 -> float
     *out0 = _mm256_cvtepi32_ps(mi32);
     *out1 = _mm256_cvtepi32_ps(mq32);
+}
+
+void Receiver::TakeEvenDebug(float *x, float *Output, int Length)
+{
+    //for(int i = 0; i<16;i++)
+    //    x[i] = i;
+    for (size_t i = 0; i < Length; i += 16) 
+    {
+    __m256 a0 = _mm256_loadu_ps(x + i);
+    __m256 a1 = _mm256_loadu_ps(x + i + 8);
+
+    __m256 e0 = _mm256_shuffle_ps(a0, a1, _MM_SHUFFLE(2,0,2,0));
+    __m256d e0d = _mm256_castps_pd(e0);
+    e0d = _mm256_permute4x64_pd(e0d, 0xD8);//1000
+    e0 = _mm256_castpd_ps(e0d);
+
+
+    _mm256_storeu_ps(Output + i/2, e0);
+    }
+
 }
