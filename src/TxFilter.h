@@ -6,6 +6,7 @@
 class TxFilter
 {
 	
+	protected:
 	Ipp32f PI;
 	Ipp32f *SqrtrcFilter = 0;
 	unsigned int FilterLength;
@@ -19,12 +20,12 @@ class TxFilter
 	
 	Ipp32u BufferMask;	
 
-	void GenerateSqrtrcFilter(Ipp32f Alpha, unsigned int HalfDelay, Ipp32u SamplingFrequency);
+	void GenerateSqrtrcFilter(double Alpha, unsigned int HalfDelay, Ipp32u SamplingFrequency);
 public:
 	TxFilter();
 	~TxFilter(void);
-	void CreateObjects(Ipp32f RollofIn);
-	void CreateOutputs(Ipp32f *InputI, Ipp32f *InputQ, Ipp32f *OutI, Ipp32f *OutQ,  unsigned int InputLength);
+	virtual void CreateObjects(double RollofIn);
+	virtual void CreateOutputs(Ipp32f *InputI, Ipp32f *InputQ, Ipp32f *OutI, Ipp32f *OutQ,  unsigned int InputLength);
 	void DeleteObjects(void);
 	double TxPower;
 

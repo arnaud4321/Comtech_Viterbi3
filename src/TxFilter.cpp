@@ -34,7 +34,7 @@ void TxFilter::DeleteObjects(void)
 	pDlyDstQ = 0;
 
 }
-void TxFilter::CreateObjects(Ipp32f RollOffIn)
+void TxFilter::CreateObjects(double RollOffIn)
 {
 	//Calculate Length
 	RollOff = RollOffIn;
@@ -87,34 +87,34 @@ void TxFilter::CreateOutputs(Ipp32f *InI, Ipp32f *InQ, Ipp32f *OutI, Ipp32f *Out
 
 
 
-void TxFilter::GenerateSqrtrcFilter(Ipp32f Alpha, unsigned int HalfDelay, Ipp32u SamplingFrequency)
+void TxFilter::GenerateSqrtrcFilter(double Alpha, unsigned int HalfDelay, Ipp32u SamplingFrequency)
 {
 	unsigned int FilterLength = 2*HalfDelay + 1;
 
-	Ipp32f *NTs = ippsMalloc_32f(FilterLength);	//Sampling Times
-	Ipp32f TS = 1.0/Ipp32f(SamplingFrequency);
+	Ipp64f *NTs = ippsMalloc_64f(FilterLength);	//Sampling Times
+	Ipp64f TS = 1.0/Ipp64f(SamplingFrequency);
 	SqrtrcFilter = ippsMalloc_32f(FilterLength); //Allocate Memory for the filter
 
 	//Initialize to -HD*Ts:Ts:HD*Ts;
-	ippsVectorSlope_32f(NTs, FilterLength, -1.0 * Ipp32f(HalfDelay) * TS, TS);
+	ippsVectorSlope_64f(NTs, FilterLength, -1.0 * Ipp64f(HalfDelay) * TS, TS);
 	//Zero is in the middle
-	SqrtrcFilter[HalfDelay] = (PI*(1-Alpha)+4*Alpha)/PI/sqrt(float(SamplingFrequency));
+	SqrtrcFilter[HalfDelay] = (PI*(1-Alpha)+4*Alpha)/PI/sqrt(double(SamplingFrequency));
 
 	for(unsigned int ii =0; ii < HalfDelay; ii++)
 	{
-		Ipp32f PiT = PI * NTs[ii];
+		Ipp64f PiT = PI * NTs[ii];
 		if(abs(NTs[ii]) == 0.25/Alpha)
 		{
 			//Special treatment
-			SqrtrcFilter[ii] = -1/sqrt(float(SamplingFrequency))/2*(cos(1/4/Alpha*PI*(1-Alpha))*PI*(1-Alpha)+4*Alpha*cos(1/4/Alpha*PI*(1+Alpha))-sin(1/4/Alpha*PI*(1+Alpha))*PI*(1+Alpha))/PI;
+			SqrtrcFilter[ii] = -1/sqrt(double(SamplingFrequency))/2*(cos(0.25/Alpha*PI*(1-Alpha))*PI*(1-Alpha)+4*Alpha*cos(0.25/Alpha*PI*(1+Alpha))-sin(0.25/Alpha*PI*(1+Alpha))*PI*(1+Alpha))/PI;
 		}
 		else
 		{
-			Ipp32f h1 = sin(PiT*(1-Alpha)) + 4*Alpha*NTs[ii]*cos(PiT*(1+Alpha));
+			Ipp64f h1 = sin(PiT*(1-Alpha)) + 4*Alpha*NTs[ii]*cos(PiT*(1+Alpha));
 
-			Ipp32f h2 =(PiT*(1-(4*Alpha*NTs[ii])*(4*Alpha*NTs[ii])));
+			Ipp64f h2 =(PiT*(1-(4*Alpha*NTs[ii])*(4*Alpha*NTs[ii])));
 
-			SqrtrcFilter[ii] = h1/h2/sqrt(float(SamplingFrequency));
+			SqrtrcFilter[ii] = (float) (h1/h2/sqrt(float(SamplingFrequency)));
 			SqrtrcFilter[FilterLength - 1 - ii] = SqrtrcFilter[ii];
 
 		}
