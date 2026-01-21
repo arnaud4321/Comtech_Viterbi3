@@ -35,9 +35,9 @@ void Sampler::StopThread(void)
 }
 void Sampler::OperateSampler(void)
 {
+    NumBatches = 0;
     condition_variable *pCvFromCh, *pCvToCh;
     pChannel->GetCvs2User(pCvToCh, pCvFromCh);//the function is defined from the point of view of Channel
-    double NumBatches = 0;
     auto Start = std::chrono::high_resolution_clock::now();
     while(!StopAll)
     {
