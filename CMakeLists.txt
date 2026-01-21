@@ -22,7 +22,7 @@ message(STATUS "Building: ${CMAKE_BUILD_TYPE}")
 set(CMAKE_SYSTEM_NAME Linux)
 
 # specify the C++ standard
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 
 # c++
 set(CMAKE_CXX_FLAGS_DEBUG "-qipp=common -axCORE-AVX2 -xCORE-AVX2 -D_DEBUG -debug parallel -O0 -g")

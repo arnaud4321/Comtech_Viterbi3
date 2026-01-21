@@ -1,5 +1,5 @@
 #include "Transmitter.h"
-
+extern mutex mtxfilethr;
 Transmitter::Transmitter(/* args */):DataQ(LengthQueue),FilterQ(LengthQueue)
 {
     ScrambledOut = (unsigned char*) _mm_malloc(BatchSize3+32,32);
@@ -88,6 +88,14 @@ void Transmitter::StopThreads(void)
 void Transmitter::GenerateData(void)
 {
 
+     #ifdef WRITE_LOG_THR
+	mtxfilethr.lock();
+    FILE *fidthr = fopen("LogThreadsInfo.txt","at");
+    fprintf(fidthr,"Transmitter GenerateData Thread %d\n", gettid());
+    fclose(fidthr);
+    mtxfilethr.unlock();
+    #endif
+
     unsigned int PtrData = 0;
     while(!StopAll)
     {
@@ -139,6 +147,13 @@ void Transmitter::GenerateData(void)
 
 void Transmitter::FilterData(void)
 {
+ #ifdef WRITE_LOG_THR
+	mtxfilethr.lock();
+    FILE *fidthr = fopen("LogThreadsInfo.txt","at");
+    fprintf(fidthr,"Transmitter FilterData Thread %d\n", gettid());
+    fclose(fidthr);
+    mtxfilethr.unlock();
+    #endif
 
     while(!StopAll)
     {

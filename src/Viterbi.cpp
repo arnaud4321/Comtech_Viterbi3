@@ -1,17 +1,18 @@
 #include "Viterbi.h"
+#include <emmintrin.h>
 #include <immintrin.h>
+#include <xmmintrin.h>
 
 
-Viterbi::Viterbi()
+Viterbi::Viterbi(int Idx):DecoderID(Idx)
 {
-	PuncPattCycle = 0;
 
 	//Derived Constants
 
 	intNParam = 2;
 	intCLength = 7;
 	CLengthM1 = intCLength - 1;
-	
+	FirstTracebackPeriod = 64;
 	NumTransitions = (1 << intNParam);
 
 	BranchMetrics = (float *)  _mm_malloc(64*sizeof(float),32); //Each time we calculate 8I 8 Q and spread the metrics across an 256 
@@ -25,6 +26,9 @@ Viterbi::Viterbi()
 
 
 	bmatSurvMem = new  uint64_t[MAX_BURST_LENGTH]; //One int64 fits a row
+	MaskSurv = MAX_BURST_LENGTH -1;
+	for(int i = MaskSurv; i >= MAX_BURST_LENGTH-256; i--)
+		bmatSurvMem[i] = 0;
 	imatDecodingTable = new int [intNoStates*2];
 	ivecGenPolys = new unsigned int [intNParam];
 	//Branch Metrics Calculation 
@@ -32,12 +36,12 @@ Viterbi::Viterbi()
 	AllBinVecs = new int [ NumTransitions *intNParam];
 
 	//Depuncturing
-	DepuncOutputBuffer = (float *)_mm_malloc(BranchMetricsPeriod*sizeof(float), 32);
+	//DepuncOutputBuffer = (float *)_mm_malloc(BranchMetricsPeriod*sizeof(float), 32);
 
 	__m256 mZero = _mm256_setzero_ps();
 
-	for (unsigned int ii = 0; ii < BranchMetricsPeriod; ii += 8)
-		_mm256_store_ps(DepuncOutputBuffer + ii, mZero);
+	//for (unsigned int ii = 0; ii < BranchMetricsPeriod; ii += 8)
+	//	_mm256_store_ps(DepuncOutputBuffer + ii, mZero);
 
 
 	/*for(unsigned int ii = 0; ii < intNParam; ii++)
@@ -51,10 +55,15 @@ Viterbi::Viterbi()
 
 
 	mArranged =  (__m256i *) _mm_malloc(8*32,32);
-	mArranged[0] = _mm256_set_epi32(0,1,0,1,1,0,1,0);//1st 2 are used for phase 0
+	/*mArranged[0] = _mm256_set_epi32(0,1,0,1,1,0,1,0);//1st 2 are used for phase 0
 	mArranged[1] = _mm256_set_epi32(1,0,1,0,0,1,0,1);
 	mArranged[2] =  _mm256_set_epi32(6,7,6,7,3,2,3,2);//Used for phase 1
 	mArranged[3] =  _mm256_set_epi32(7,6,7,6,2,3,2,3);//Used for phase 1
+*/
+	mArranged[0] = _mm256_setr_epi32(0,1,0,1,3,2,3,2);//1st 2 are used for phase 0
+	mArranged[1] = _mm256_setr_epi32(1,0,1,0,2,3,2,3);//1st 2 are used for phase 0
+
+
 	mPermCalc =  (__m128i *) _mm_malloc(32,16);
 	mPermCalc[0] = _mm_set_epi8(13,13,12,12,9,9,8,8,5,5,4,4,1,1,0,0);//Odd
 	mPermCalc[1] = _mm_set_epi8(15,14,15,14,11,10,11,10,7,6,7,6,3,2,3,2);//Even
@@ -76,8 +85,8 @@ Viterbi::~Viterbi(void)
 	delete [] imatDecodingTable;
 
 	delete [] AllBinVecs;
-	delete [] bvecPuncPatt;
-	_mm_free(DepuncOutputBuffer) ;
+	//delete [] bvecPuncPatt;
+	//_mm_free(DepuncOutputBuffer) ;
 	_mm_free(BranchMetrics);
 	//_mm_free(mDecsMask);
 	_mm_free(vecPathMetMem);
@@ -156,50 +165,16 @@ int Viterbi::is_odd_ones(int input)
 
 
 
-void Viterbi::traceback_at_end(int intNoOutputBits )
+
+void Viterbi::traceback_mid( unsigned char *Out, int BestMetInd, int Length)
 {
-
-	intSurvMemRdRowAddr = intSurvMemWrRowAddr - 1; // Init the pointer to compensate for the unecessary advance at end 
-	unsigned int PtrWrDec = intSurvMemRdRowAddr - (intCLength - 1);
-	int intSurvMemRdColAddr = 0; //Starting the Traceback from 0 state
-
-	for(int IndexBit = 0; IndexBit < intNoOutputBits ; IndexBit++)
-	{
-		uint64_t AllDecisions = bmatSurvMem[intSurvMemRdRowAddr];
-		AllDecisions = AllDecisions >> (intSurvMemRdColAddr);
-		unsigned int NewDecision = (unsigned int) (AllDecisions &1);
-		intSurvMemRdColAddr = ((intSurvMemRdColAddr << 1) & intMask) | NewDecision;
-		//BestStates[intSurvMemRdRowAddr] = intSurvMemRdColAddr;
-		bvecDecodedBits[PtrWrDec--] = (unsigned char) NewDecision;
-		intSurvMemRdRowAddr--;
-	}
-}
-
-void Viterbi::traceback_mid(void)
-{
-	//Find the best metric (lowest)
 	
-	int BestMetInd = 0;
-	
-	/*
-	double BestMetVal = vecPathMetMem[0 + intOldPathMetMemPtr];
-	
-
-	for(unsigned int NoState = 1; NoState < intNoStates; NoState++)
-		if(vecPathMetMem[NoState + intOldPathMetMemPtr] < BestMetVal)
-		{
-			BestMetVal = vecPathMetMem[NoState + intOldPathMetMemPtr];
-			BestMetInd = NoState;
-		}
-
-		*/
 
 
 
 		//Start the Traceback 
-		intSurvMemRdRowAddr = intSurvMemWrRowAddr - 1; // Init the pointer to compensate for the unecessary advance at end 
-
-		unsigned char *DecPtr = bvecDecodedBits + intSurvMemRdRowAddr - (intTrcbckLen << 1);
+		intSurvMemRdRowAddr = (intSurvMemWrRowAddr - 1)& MaskSurv; // Init the pointer to compensate for the unecessary advance at end 
+		
 
 		int intSurvMemRdColAddr = BestMetInd; //Starting the Traceback from best State
 
@@ -213,29 +188,26 @@ void Viterbi::traceback_mid(void)
 			unsigned int NewDecision = (unsigned int) (AllDecisions &1);
 			intSurvMemRdColAddr = ((intSurvMemRdColAddr << 1) & intMask) | NewDecision;
 			intSurvMemRdRowAddr--;
-
+ 			intSurvMemRdRowAddr &= MaskSurv;
 		}
 
 		//Traceback Decode
 
 	
 
-		while (intSurvMemRdRowAddr >= TracebackStop)
+		for(int i = Length-1; i >= 0; i--)
 		{
 			uint64_t AllDecisions = bmatSurvMem[intSurvMemRdRowAddr];
 			AllDecisions = AllDecisions >> (intSurvMemRdColAddr);
 			unsigned int NewDecision = (unsigned int) (AllDecisions &1);
 			intSurvMemRdColAddr = ((intSurvMemRdColAddr << 1) & intMask) | NewDecision;
-			*DecPtr = (unsigned char) NewDecision;
-			DecPtr--;
+			Out[i] = (unsigned char) NewDecision;
 			intSurvMemRdRowAddr--;
+			intSurvMemRdRowAddr &= MaskSurv;
 
 		}
 
 		//Update the counter of Decoded bits
-
-		intNumDecodedBits += intTrcbckLen;
-
 
 }
 
@@ -316,7 +288,6 @@ void Viterbi::Decode(float *InputI, float *InputQ, unsigned int InputLength, uns
 	int Ctr = 0;
 	
 	bvecDecodedBits = Output;
-	reset_decoder();
 	float BestMetric1;
 	float *pInputI = InputI;
 	float *pInputQ = InputQ;
@@ -328,23 +299,40 @@ void Viterbi::Decode(float *InputI, float *InputQ, unsigned int InputLength, uns
 
 	__m256 mSignI = _mm256_set1_ps(SignI);
 	__m256 mSignQ = _mm256_set1_ps(SignQ);
-	float *pBranchMet = BranchMetrics;
-	
 	for (unsigned int ii = 0; ii < InputLength; ii += 8)
-	{
-		
-		CalcMetrics2(pInputI,pInputQ,mSignI,mSignQ);
-		AcsAll(pBranchMet, bmatSurvMem + intSurvMemWrRowAddr, 0);
-		intNewPathMetMemPtr = intOldPathMetMemPtr;
-		intOldPathMetMemPtr = intNoStates - intOldPathMetMemPtr;
-		intSurvMemWrRowAddr++;
-		pBranchMet += 8;
+	{		
+		CalcMetrics2(pInputI+ii,pInputQ+ii,mSignI,mSignQ);
+		float *pBranchMet = BranchMetrics;
+
+		for( int jj = 0; jj < 8; jj++)
+		{
+			AcsAllNew(pBranchMet, bmatSurvMem + intSurvMemWrRowAddr);
+			intNewPathMetMemPtr = intOldPathMetMemPtr;
+			intOldPathMetMemPtr = intNoStates - intOldPathMetMemPtr;
+			intSurvMemWrRowAddr = (intSurvMemWrRowAddr+1)&(MaskSurv);
+			pBranchMet += 8;
+		}
 	}
 
-	traceback_mid();
-	float BestMetric2 = CalcBestMetric(vecPathMetMem + intNewPathMetMemPtr);
-	MetricsGrowth = BestMetric2 - BestMetric1;
-	MetricsGrowth = MetricsGrowth / float(Ctr - intTrcbckLen);
+	int BestIndex;
+	float BestMetric2 = CalcBestMetric(vecPathMetMem + intOldPathMetMemPtr, BestIndex);
+	//Normalize
+	if(BestMetric2 > 0)
+	{
+		__m256 mBest = _mm256_set1_ps(BestMetric2);
+		for(int i = 0; i < 64; i+=8)
+		{
+			__m256 mIn = _mm256_load_ps(vecPathMetMem + intOldPathMetMemPtr+i);
+			mIn = _mm256_sub_ps(mIn,mBest);
+			_mm256_store_ps(vecPathMetMem + intOldPathMetMemPtr+i,mIn);
+		}
+	}
+
+	traceback_mid(Output, BestIndex, InputLength);
+
+	MetricsGrowth = BestMetric2;
+	NumBits += InputLength;
+	//MetricsGrowth = MetricsGrowth / float(Ctr - intTrcbckLen);
 
 }
 
@@ -487,7 +475,65 @@ void Viterbi::CalcMetrics2(float *Input, unsigned int InputLength)
 	}
 
 }
-#ifdef AVX2_CODE
+
+
+void Viterbi::AcsAllNew(float *BranchMet, uint64_t *Decisions)
+{
+
+	//for(int i = 0; i < 64; i++)
+	//vecPathMetMem[intOldPathMetMemPtr + i] = i;
+	
+	alignas (32) unsigned int TempDecisions[4];
+	__m256 Input = _mm256_load_ps(BranchMet);
+	//Input = _mm256_setr_ps(0,1,2,3,0,1,2,3);
+
+	__m256 BranchMet4[4];
+
+	BranchMet4[0] = _mm256_permutevar_ps(Input, mArranged[0]);
+	BranchMet4[1] = _mm256_permute2f128_ps(BranchMet4[0],Input,0x01);
+	BranchMet4[2] = _mm256_permutevar_ps(Input, mArranged[1]);
+	BranchMet4[3] = _mm256_permute2f128_ps(BranchMet4[2],Input,0x01);
+	int TableA[8] = {0,1,3,2,1,0,2,3};
+	int TableB[8] = {1,0,2,3,0,1,3,2};
+	
+	alignas(32) int LocalDecisionsLow[4], LocalDecisionsHigh[4];
+
+	int PtrTbl = 0;
+	int State = 0;
+	int StateOut = 0;
+	int PtrOut = 0;
+	for(; State < 64; )
+	{
+		__m256 mInputA = _mm256_load_ps(&vecPathMetMem[intOldPathMetMemPtr + State]);
+		State += 8;
+		__m256 mInputB = _mm256_load_ps(&vecPathMetMem[intOldPathMetMemPtr + State]);
+		State += 8;
+		__m256 X0_8 = _mm256_insertf128_ps(mInputA, _mm256_castps256_ps128(mInputB), 1);
+		__m256 X4_12 = _mm256_permute2f128_ps(mInputA, mInputB, 0x31);//4,5,6,7,12,13,14,15
+		__m256 mEven = _mm256_shuffle_ps(X0_8, X4_12, 0x88);//0 2 4 6,8,10,12,14
+		__m256 mOdd = _mm256_shuffle_ps(X0_8, X4_12, 0xDD);//1 3 5 7, 9,11,13,15
+		__m256 SumA = _mm256_add_ps(mEven,BranchMet4[TableA[PtrTbl]]);
+		__m256 SumB = _mm256_add_ps(mOdd,BranchMet4[TableB[PtrTbl]]);
+		__m256 SumC = _mm256_add_ps(mEven,BranchMet4[TableB[PtrTbl]]);
+		__m256 SumD = _mm256_add_ps(mOdd,BranchMet4[TableA[PtrTbl]]);
+		PtrTbl++;
+		__m256 CmpAB = _mm256_cmp_ps(SumB, SumA, _CMP_LT_OQ);
+		__m256 CmpCD = _mm256_cmp_ps(SumD, SumC, _CMP_LT_OQ);
+		__m256 NewMetLow = _mm256_blendv_ps(SumA, SumB, CmpAB);
+		__m256 NewMetHigh = _mm256_blendv_ps(SumC, SumD, CmpCD);
+		LocalDecisionsLow[PtrOut] = _mm256_movemask_ps(CmpAB);
+		LocalDecisionsHigh[PtrOut] = _mm256_movemask_ps(CmpCD);
+		PtrOut++;
+		_mm256_store_ps(vecPathMetMem + intNewPathMetMemPtr + StateOut, NewMetLow);
+		_mm256_store_ps(vecPathMetMem + intNewPathMetMemPtr + StateOut+32, NewMetHigh);
+		StateOut += 8;
+	}
+	
+	
+
+	*Decisions = (uint64_t)(((uint64_t) LocalDecisionsLow[0] ) | (((uint64_t) LocalDecisionsLow[1] ) << 8) | (((uint64_t) LocalDecisionsLow[2] ) << 16) | (((uint64_t) LocalDecisionsLow[3] ) << 24) | (((uint64_t) LocalDecisionsHigh[0] ) << 32) | (((uint64_t) LocalDecisionsHigh[1] ) << 40) | (((uint64_t) LocalDecisionsHigh[2] ) << 48) | (((uint64_t) LocalDecisionsHigh[3] ) << 56));   
+}
+
 
 void Viterbi::AcsAll(float *BranchMet, uint64_t* Decisions, unsigned int Phase)
 {
@@ -675,188 +721,50 @@ void Viterbi::AcsAll(float *BranchMet, uint64_t* Decisions, unsigned int Phase)
 	//	IACA_END
 }
 
-#else
 
-void Viterbi::AcsAll(float *BranchMet, __int64* Decisions, unsigned int Phase)
+float Viterbi::CalcBestMetric(float *Input, int& Position)
 {
-	__declspec(align(16)) unsigned int TempDecisions[4];
+	__m256i currentindex = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
+	__m256i bestindex = currentindex;
+	
+	__m256 BestMetrics = _mm256_load_ps(Input);
+	__m256i Delta = _mm256_set1_epi32(8);
 
-	//Create the required structures
-
-	__m256 BranchMet4[4];
-
-	//A0B0A1B1C0D0C1D1
-	__m256 Input = _mm256_load_ps(BranchMet);
-	if(Phase == 0)
+	for(int i= 8; i < 64; i+= 8)
 	{
-		BranchMet4[1] = _mm256_permutevar_ps(Input,mArranged[1])  ;//10102323
-		BranchMet4[0] = _mm256_permutevar_ps(Input,mArranged[0])  ;//01013232      0100 0100
-		BranchMet4[2] = _mm256_permute2f128_ps(BranchMet4[1],BranchMet4[1],0x01);
-		BranchMet4[3] = _mm256_permute2f128_ps(BranchMet4[0],BranchMet4[0],0x01);
-
+		__m256 New = _mm256_load_ps(Input+i);
+		currentindex = _mm256_add_epi32(currentindex,Delta);
+		__m256 mask = _mm256_cmp_ps(New, BestMetrics, _CMP_LT_OQ);
+		BestMetrics = _mm256_blendv_ps(BestMetrics, New, mask);
+		bestindex = _mm256_blendv_epi8(bestindex, currentindex, mask);
 	}
-	else
+
+	__m128 BestMetrics0 = _mm256_castps256_ps128(BestMetrics);
+	__m128i bestindex0 = _mm256_castsi256_si128(bestindex);
+	__m128 BestMetrics1 = _mm256_extractf128_ps(BestMetrics, 1);
+	__m128i bestindex1 = _mm256_extracti128_si256(bestindex, 1);
+	__m128 mask = _mm_cmp_ps(BestMetrics1, BestMetrics0, _CMP_LT_OQ);
+	BestMetrics0 = _mm_blendv_ps(BestMetrics0, BestMetrics1, mask);
+	bestindex0 = _mm_blendv_epi8(bestindex0, bestindex1, mask);
+	BestMetrics1 = _mm_permute_ps (BestMetrics0, 0x1B);// 00011011
+	bestindex1 = _mm_shuffle_epi32(bestindex0, 0x1B);
+	mask = _mm_cmp_ps(BestMetrics1, BestMetrics0, _CMP_LT_OQ);
+	BestMetrics0 = _mm_blendv_ps(BestMetrics0, BestMetrics1, mask);
+	bestindex0 = _mm_blendv_epi8(bestindex0, bestindex1, mask);
+	
+	alignas(32) float TwoMetrics[2];
+	alignas(32) int TwoIndexes[2];
+	_mm_store_sd((double*)TwoMetrics, _mm_castps_pd(BestMetrics0));
+	_mm_storel_epi64((__m128i*)TwoIndexes, bestindex0);
+	Position = TwoIndexes[0];
+	float BestAll = TwoMetrics[0];
+	if(TwoMetrics[1] < BestAll)
 	{
-		BranchMet4[1] = _mm256_permutevar_ps(Input,mArranged[3])  ;//10102323
-		BranchMet4[0] = _mm256_permutevar_ps(Input,mArranged[2])  ;//01013232      0100 0100
-		BranchMet4[2] = _mm256_permute2f128_ps(BranchMet4[1],BranchMet4[1],0x01);
-		BranchMet4[3] = _mm256_permute2f128_ps(BranchMet4[0],BranchMet4[0],0x01);
-
-
+		BestAll = TwoMetrics[1];
+		Position = TwoIndexes[1];
 	}
-//	IACA_START
-	//First 8
-
-
-
-
-
-	__m256 mInputA = _mm256_load_ps(&vecPathMetMem[intOldPathMetMemPtr+0]);
-
-	__m256 mInputB = _mm256_load_ps(&vecPathMetMem[intOldPathMetMemPtr+8]);
-	//IACA_END
-	//__m256 X0_8 = _mm256_permute2f128_ps(mInputA,mInputB,0x20);//0123,8,9,10,11
-	__m256 X0_8 = _mm256_insertf128_ps(mInputA, _mm_load_ps(&vecPathMetMem[intOldPathMetMemPtr + 8]), 1);
-	__m256 X4_12 = _mm256_permute2f128_ps(mInputA,mInputB,0x31);//4,5,6,7,12,13,14,15
-	
-	__m256 A = _mm256_shuffle_ps(X0_8,X4_12,0x88);//0 2 4 6,8,10,12,14
-	__m256 B = _mm256_shuffle_ps(X0_8,X4_12,0xDD);//1 3 5 7, 9,11,13,15
-	
-	__m256 SumA = _mm256_add_ps(A, BranchMet4[0]);
-	__m256 SumB = _mm256_add_ps(B,BranchMet4[3]);
-
-	mInputA = _mm256_load_ps(&vecPathMetMem[intOldPathMetMemPtr + 16]);
-	mInputB = _mm256_load_ps(&vecPathMetMem[intOldPathMetMemPtr + 24]);
-
-	__m256 CmpAB = _mm256_cmp_ps(SumB,SumA,2);
-	__m256 NewMet = _mm256_blendv_ps(SumA,SumB,CmpAB);
-	int Decs0 = _mm256_movemask_ps(CmpAB);
-	_mm256_store_ps(vecPathMetMem+intNewPathMetMemPtr,NewMet);
-	
-
-	
-	X0_8 = _mm256_insertf128_ps(mInputA, _mm_load_ps(&vecPathMetMem[intOldPathMetMemPtr + 24]), 1);
-	X4_12 = _mm256_permute2f128_ps(mInputA, mInputB, 0x31);//4,5,6,7,12,13,14,15
-
-
-	SumA = _mm256_add_ps(A,BranchMet4[3]);
-	SumB = _mm256_add_ps(B,BranchMet4[0]);
-
-	A = _mm256_shuffle_ps(X0_8, X4_12, 0x88);//0 2 4 6,8,10,12,14
-	B = _mm256_shuffle_ps(X0_8, X4_12, 0xDD);//1 3 5 7, 9,11,13,15
-
-
-	__m256 CmpCD = _mm256_cmp_ps(SumB,SumA,2);
-	NewMet = _mm256_blendv_ps(SumA,SumB,CmpCD);
-	int Decs32 = _mm256_movemask_ps(CmpCD);
-	_mm256_store_ps(vecPathMetMem+intNewPathMetMemPtr+32,NewMet);
-
-	
-	//Next 8 
-
-	//X0_8 = _mm256_permute2f128_ps(mInputA,mInputB,0x20);//0123,8,9,10,11
-
-
-
-
-
-	SumA = _mm256_add_ps(A,BranchMet4[3]);
-	SumB = _mm256_add_ps(B,BranchMet4[0]);
-	
-	mInputA = _mm256_load_ps(&vecPathMetMem[intOldPathMetMemPtr + 32]);
-	mInputB = _mm256_load_ps(&vecPathMetMem[intOldPathMetMemPtr + 40]);
-
-
-	CmpAB = _mm256_cmp_ps(SumB,SumA,2);
-	NewMet = _mm256_blendv_ps(SumA,SumB,CmpAB);
-	int Decs8 = _mm256_movemask_ps(CmpAB);
-	_mm256_store_ps(vecPathMetMem+intNewPathMetMemPtr+8,NewMet);
-	
-	X0_8 = _mm256_insertf128_ps(mInputA, _mm_load_ps(&vecPathMetMem[intOldPathMetMemPtr + 40]), 1);
-	X4_12 = _mm256_permute2f128_ps(mInputA, mInputB, 0x31);//4,5,6,7,12,13,14,15
-
-
-	SumA = _mm256_add_ps(A,BranchMet4[0]);
-	SumB = _mm256_add_ps(B,BranchMet4[3]);
-
-	A = _mm256_shuffle_ps(X0_8, X4_12, 0x88);//0 2 4 6,8,10,12,14
-	B = _mm256_shuffle_ps(X0_8, X4_12, 0xDD);//1 3 5 7, 9,11,13,15
-
-	CmpCD = _mm256_cmp_ps(SumB,SumA,2);
-	NewMet = _mm256_blendv_ps(SumA,SumB,CmpCD);
-	int Decs40 = _mm256_movemask_ps(CmpCD);
-
-
-	_mm256_store_ps(vecPathMetMem+intNewPathMetMemPtr+40,NewMet);
-
-	
-
-	//Next 8 
-
-	//X0_8 = _mm256_permute2f128_ps(mInputA,mInputB,0x20);//0123,8,9,10,11
-
-	
-
-
-	SumA = _mm256_add_ps(A,BranchMet4[2]);
-	SumB = _mm256_add_ps(B,BranchMet4[1]);
-
-	mInputA = _mm256_load_ps(&vecPathMetMem[intOldPathMetMemPtr + 48]);
-	mInputB = _mm256_load_ps(&vecPathMetMem[intOldPathMetMemPtr + 56]);
-
-
-	CmpAB = _mm256_cmp_ps(SumB,SumA,2);
-	NewMet = _mm256_blendv_ps(SumA,SumB,CmpAB);
-
-	X0_8 = _mm256_insertf128_ps(mInputA, _mm_load_ps(&vecPathMetMem[intOldPathMetMemPtr + 56]), 1);
-	X4_12 = _mm256_permute2f128_ps(mInputA, mInputB, 0x31);//4,5,6,7,12,13,14,15
-
-
-	int Decs16 = _mm256_movemask_ps(CmpAB);
-	_mm256_store_ps(vecPathMetMem+intNewPathMetMemPtr+16,NewMet);
-
-	SumA = _mm256_add_ps(A,BranchMet4[1]);
-	SumB = _mm256_add_ps(B,BranchMet4[2]);
-
-	A = _mm256_shuffle_ps(X0_8, X4_12, 0x88);//0 2 4 6,8,10,12,14
-	B = _mm256_shuffle_ps(X0_8, X4_12, 0xDD);//1 3 5 7, 9,11,13,15
-
-	CmpCD = _mm256_cmp_ps(SumB,SumA,2);
-	NewMet = _mm256_blendv_ps(SumA,SumB,CmpCD);
-	int Decs48 = _mm256_movemask_ps(CmpCD);
-
-
-	_mm256_store_ps(vecPathMetMem+intNewPathMetMemPtr+48,NewMet);
-
-	
-
-	//Next 8 
-
-	//X0_8 = _mm256_permute2f128_ps(mInputA,mInputB,0x20);//0123,8,9,10,11
-
-
-
-
-	SumA = _mm256_add_ps(A,BranchMet4[1]);
-	SumB = _mm256_add_ps(B,BranchMet4[2]);
-	CmpAB = _mm256_cmp_ps(SumB,SumA,2);
-	NewMet = _mm256_blendv_ps(SumA,SumB,CmpAB);
-	int Decs24 = _mm256_movemask_ps(CmpAB);
-	_mm256_store_ps(vecPathMetMem+intNewPathMetMemPtr+24,NewMet);
-
-	SumA = _mm256_add_ps(A,BranchMet4[2]);
-	SumB = _mm256_add_ps(B,BranchMet4[1]);
-	CmpCD = _mm256_cmp_ps(SumB,SumA,2);
-	NewMet = _mm256_blendv_ps(SumA,SumB,CmpCD);
-	int Decs56 = _mm256_movemask_ps(CmpCD);
-	_mm256_store_ps(vecPathMetMem+intNewPathMetMemPtr+56,NewMet);
-
-	*Decisions = ((unsigned __int64) Decs0) | (((unsigned __int64) Decs8) << 8)  | (((unsigned __int64) Decs16) << 16)  | (((unsigned __int64) Decs24) << 24)   | (((unsigned __int64) Decs32) << 32)  | (((unsigned __int64) Decs40) << 40)  | (((unsigned __int64) Decs48) << 48)  | (((unsigned __int64) Decs56) << 56) ;
-//	IACA_END
+	return BestAll;
 }
-
-#endif
-
 
 
 float Viterbi::CalcBestMetric(float *Input)
@@ -886,19 +794,11 @@ float Viterbi::CalcBestMetric(float *Input)
 
 
 
-void Viterbi::update_survivors(int NewState, unsigned int *Decision)
-{
-	bmatSurvMem[(intSurvMemWrRowAddr << intCLength) + NewState] = Decision[0];
-	bmatSurvMem[(intSurvMemWrRowAddr << intCLength) + NewState+1] = Decision[1];
-	bmatSurvMem[(intSurvMemWrRowAddr << intCLength) + NewState+(intNoStates>>1)] = Decision[2];
-	bmatSurvMem[(intSurvMemWrRowAddr << intCLength) + NewState+(intNoStates>>1)+1] = Decision[3];
 
-
-}
 void Viterbi::reset_decoder(void)
 {
 	//reset the number of decoded bits
-	intNumDecodedBits = 0;
+	NumBits = 0;
 
 	//reset the Survivor Row Address Pointers
 	intSurvMemWrRowAddr = 0;
@@ -907,13 +807,13 @@ void Viterbi::reset_decoder(void)
 	intOldPathMetMemPtr = 0;
 	intNewPathMetMemPtr = intNoStates; 
 
-	// reset the Path Metrics Make State 0 the preffered one
+	// reset the Path Metrics all 0  0 the preffered one
 	for(unsigned int ii = 0; ii < 2*intNoStates; ii++)
 	{
 		vecPathMetMem[ii] = 0;
 	}
 
-//	vecPathMetMem[0] = 0;
-
+	for(int i = MaskSurv; i >= MAX_BURST_LENGTH-256; i--)
+		bmatSurvMem[i] = 0;
 	
 }

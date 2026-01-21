@@ -1,6 +1,7 @@
 #include "AWGNChannel.h"
 #include "Transmitter.h"
 extern bool Finish;
+extern mutex mtxfilethr;
 AWGNChannel::AWGNChannel(unsigned int Seed):NoiseQ(LengthQueue),OutputBuffer(128*TxOutputBatchSize,2*TxOutputBatchSize)
 {
     oNoiseGen.set_seed(Seed);
@@ -21,7 +22,7 @@ AWGNChannel::AWGNChannel(unsigned int Seed):NoiseQ(LengthQueue),OutputBuffer(128
 
 AWGNChannel::~AWGNChannel()
 {
-    _mm_free(Noise);
+    _mm_free(Noise[0]);
     #ifdef DEBUG_AWGN
         _mm_free(OutAllI);
     #endif
@@ -63,6 +64,15 @@ void AWGNChannel::StopThreads(void)
 
 void AWGNChannel::GenerateNoise(void)
 {
+
+
+    #ifdef WRITE_LOG_THR
+	mtxfilethr.lock();
+    FILE *fidthr = fopen("LogThreadsInfo.txt","at");
+    fprintf(fidthr,"Generate Noise  Thread %d\n", gettid());
+    fclose(fidthr);
+    mtxfilethr.unlock();
+    #endif
     while(!StopAll)
     {
         while(!NoiseQ.AvailableWrite())
@@ -87,7 +97,13 @@ void AWGNChannel::GenerateNoise(void)
 
 void AWGNChannel::GenerateOutput(void)
 {
-
+    #ifdef WRITE_LOG_THR
+	mtxfilethr.lock();
+    FILE *fidthr = fopen("LogThreadsInfo.txt","at");
+    fprintf(fidthr,"Channel Output Thread %d\n", gettid());
+    fclose(fidthr);
+    mtxfilethr.unlock();
+    #endif
     condition_variable *pCvTxChn, *pCvChnTx;
 
     pTx->GetCVOut(pCvChnTx, pCvTxChn );
@@ -169,7 +185,7 @@ void AWGNChannel::GenerateOutput(void)
         #endif
         pTx->AdvanceOut();
         pCvChnTx->notify_one();
-        NoiseQ.AdvanceWrite();
+        NoiseQ.AdvanceRead();
         CvOutNoise.notify_one();
         OutputBuffer.AdvancePtrWr(TxOutputBatchSize);
         CvOutUser.notify_one();

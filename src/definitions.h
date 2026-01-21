@@ -16,5 +16,7 @@ enum SimModes
 {
     ACQ_SIM,CONT_SIM
 };
+const float ViterbiThreshold1 = 150; //difference between best metric and other 3 options
+const int PRBSThreshold = 12;
 
-
+#define WRITE_LOG_THR

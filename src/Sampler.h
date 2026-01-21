@@ -3,6 +3,7 @@
 #include <thread>
 #include <condition_variable>
 #include "definitions.h"
+#include "random_generator_new.h"
 class AWGNChannel;
 #include "BufferShort.h"
 using namespace std;
@@ -28,6 +29,7 @@ private:
     condition_variable  CvSamplerUser;
     void OperateSampler(void);
 public:
+    uint64_t NumBatches;
     Sampler(bool DebugIn);
     ~Sampler();
     void StartThread(void);
