@@ -18,7 +18,7 @@ class random_generator_new
 	std::mt19937 gen{};
 	std::normal_distribution<float> d{ 0,1.0 };
 	std::normal_distribution<double> d1{ 0,1.0 };
-
+	std::uniform_real_distribution<double> dist{0.0, 1.0};
 
 public:
 	random_generator_new();
@@ -29,7 +29,10 @@ public:
 	}
 	void randn(float * output, unsigned int length);
 	void randn(double * output, unsigned int length);
-
+	void rand01(double &out)
+	{
+		out = dist(gen);
+	}
 	void random(float * output, unsigned int length);
 
 	void randb(unsigned char  *output, unsigned int Len);
