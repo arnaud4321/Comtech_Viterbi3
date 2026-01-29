@@ -6,6 +6,7 @@ class Transmitter;
 #include <immintrin.h>
 #include "SimpleQueue.h"
 #include "BufferShort.h"
+#include "FrequencyOffset.h"
 #include "definitions.h"
 using namespace std;
 
@@ -25,6 +26,7 @@ private:
     const int NumBits = 16;
     int NoiseBatchSize;
     random_generator_new oNoiseGen;
+    FrequencyOffset objFreqOffset;
     double Stdn; 
     Transmitter *pTx;
     static constexpr int LengthQueue = 4;
