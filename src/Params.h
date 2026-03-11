@@ -17,7 +17,8 @@ public:
     double RollOff;
     double TimeDrift;
     double FrequencyShift;
-    bool RandomFrequency;
+    double AccelerationPeriod;
+    double TotalPeriod, StablePeriod;
     SimModes SimMode;
     unsigned int NumErrors;
     unsigned int Seed;

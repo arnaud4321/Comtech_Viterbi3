@@ -24,11 +24,11 @@ void Params::ReadParams(string FileName)
 	EsN0 = j["Channel"]["Esn0"];
     TimeDrift =  j["Channel"]["Drift"];
     FrequencyShift = j["Channel"]["FrequencyShift"];
-    Tmp = j["Channel"]["RandomFrequency"];
-    if(Tmp == 0)
-        RandomFrequency = false;
-    else
-        RandomFrequency = true;
+    AccelerationPeriod = j["Channel"]["AccelerationPeriod"];
+    StablePeriod = j["Channel"]["StablePeriod"];
+    TotalPeriod = 2*(AccelerationPeriod + StablePeriod);
+    
+    
 
     Tmp = j["Simulation"]["Method"];
     if(Tmp == 0)
