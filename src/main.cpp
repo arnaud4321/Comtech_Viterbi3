@@ -32,6 +32,7 @@ int main(int argc, char* argv[])
 	#endif
 	cout<<"Starting program"<<endl;
 	
+
  	Params objParams;
     objParams.ReadParams(argv[1]);
 	Transmitter oTx;
@@ -39,7 +40,8 @@ int main(int argc, char* argv[])
 	double TxPower = oTx.GetTxPower();
 	AWGNChannel oAWGN(objParams.Seed);
 	oAWGN.SetTransmitter(&oTx);
-	oAWGN.StartThreads(objParams.EsN0,objParams.TimeDrift,objParams.FrequencyShift, objParams.RandomFrequency);
+	oAWGN.SetParameters(&objParams);
+	oAWGN.StartThreads();
 	Sampler objSampler(objParams.Debug);
 	objSampler.SetChannel(&oAWGN);
 	objSampler.StartThread();
