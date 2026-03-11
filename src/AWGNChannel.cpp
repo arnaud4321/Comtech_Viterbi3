@@ -27,12 +27,13 @@ AWGNChannel::~AWGNChannel()
         _mm_free(OutAllI);
     #endif
 }
-void AWGNChannel::StartThreads(float EsN0db, double TimeDrift, double FrequencyShift, bool RandomFrequency)
+void AWGNChannel::StartThreads(void)
 {
     StopAll = false;
     double TxPower = pTx->GetTxPower();
     double kTx = sqrt(TxPower);
     double Pow0 = 2.0;//constant
+    EsN0db = pParams->EsN0;
     double N0 = Pow0*pow(10.0,-0.1*EsN0db);
     double TargetPower = pow(2.0,2*NumBits-1)*pow(10.0,-0.1*Backoff);
     double TotalPower = TxPower + N0;
@@ -40,6 +41,20 @@ void AWGNChannel::StartThreads(float EsN0db, double TimeDrift, double FrequencyS
     double kSig = kAll/kTx;
     Stdn = sqrt(N0*0.5)*kAll;
     mkSig = _mm256_set1_ps(kSig);
+    double n2 = round(pParams->StablePeriod/TxOutputBatchDuration);
+    double n1 = round(pParams->AccelerationPeriod/TxOutputBatchDuration);
+
+    AccelerationPeriod = n1 *  TxOutputBatchDuration;
+    StablePeriod = n2 * TxOutputBatchDuration;
+    TotalPeriod = 2*(AccelerationPeriod+StablePeriod);
+    TransitionCounter[0] = 0; 
+    TransitionCounter[1] = n2;
+    TransitionCounter[2] = TransitionCounter[1] + n1;
+    TransitionCounter[3] = TransitionCounter[2] + n2;
+    TransitionCounter[4] = TransitionCounter[3] + n1;
+    
+    
+    
     NoiseQ.Reset();
     NoiseThread = std::thread(&AWGNChannel::GenerateNoise, this);
     OutputThread = std::thread(&AWGNChannel::GenerateOutput, this);
@@ -109,7 +124,7 @@ void AWGNChannel::GenerateOutput(void)
     pTx->GetCVOut(pCvChnTx, pCvTxChn );
 
     int NumSamples = 0;
-
+   
     while(!StopAll)
     {
         while((!NoiseQ.AvailableRead())&& (StopAll==false))
