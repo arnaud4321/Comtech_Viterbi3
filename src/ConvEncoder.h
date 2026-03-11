@@ -28,7 +28,7 @@ protected:
 	unsigned int intNParam; //the n parameter of 1/n
 	unsigned int intNoStates, intMask;
 	unsigned int *OutputTable, *NextStates;
-	int ivecGenPolys[2] = { 0171,0133 };
+	int ivecGenPolys[2] = { 0133,0171 };
 	Ipp8u Byte2BitTable[256*8+32];
 	//Private Methods
 	virtual void calc_encoding_table(void);
