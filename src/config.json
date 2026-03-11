@@ -8,8 +8,9 @@
   "Channel": {
     "Esn0": 100,
     "Drift": 0,
-    "FrequencyShift": 0,
-    "RandomFrequency":0
+    "FrequencyShift": 23333,
+    "AccelerationPeriod":40,
+    "StablePeriod":120
   },
   
   "Simulation": {
