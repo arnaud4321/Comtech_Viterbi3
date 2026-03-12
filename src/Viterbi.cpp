@@ -368,10 +368,10 @@ void  Viterbi::CalcMetrics2(float *InputI, float *InputQ, __m256 SignI, __m256 S
 
 	__m256 X01 = _mm256_permute2f128_ps(ABLow,CDLow,0x20);//A0B0A1B1C0D0C1D1
 	__m256 X45 = _mm256_permute2f128_ps(ABLow,CDLow,0x31);//A4B4A5B5C4D4C5D5
-	__m256 Y0 = _mm256_permute4x64_epi64(X01,0x88);
-	__m256 Y1 = _mm256_permute4x64_epi64(X01,0xDD);
-	__m256 Y4 = _mm256_permute4x64_epi64(X45,0x88);
-	__m256 Y5 = _mm256_permute4x64_epi64(X45,0xDD);
+	__m256 Y0 = _mm256_castsi256_ps(_mm256_permute4x64_epi64(_mm256_castps_si256(X01),0x88));
+	__m256 Y1 = _mm256_castsi256_ps(_mm256_permute4x64_epi64(_mm256_castps_si256(X01),0xDD));
+	__m256 Y4 = _mm256_castsi256_ps(_mm256_permute4x64_epi64(_mm256_castps_si256(X45),0x88));
+	__m256 Y5 = _mm256_castsi256_ps(_mm256_permute4x64_epi64(_mm256_castps_si256(X45),0xDD));
 	
 	_mm256_store_ps(BranchMetrics, Y0);
 	_mm256_store_ps(BranchMetrics+8, Y1);
@@ -379,16 +379,16 @@ void  Viterbi::CalcMetrics2(float *InputI, float *InputQ, __m256 SignI, __m256 S
 	_mm256_store_ps(BranchMetrics+40, Y5);
 	
 	
-
+	
 	__m256 ABHigh = _mm256_unpackhi_ps(M00,M01);//A2B2A3B3....
 	__m256 CDHigh = _mm256_unpackhi_ps(M10,M11);
 
 	__m256 X23 = _mm256_permute2f128_ps(ABHigh,CDHigh,0x20);//A2B2....
 	__m256 X67 = _mm256_permute2f128_ps(ABHigh,CDHigh,0x31);
-	__m256 Y2 = _mm256_permute4x64_epi64(X23,0x88);
-	__m256 Y3 = _mm256_permute4x64_epi64(X23,0xDD);
-	__m256 Y6 = _mm256_permute4x64_epi64(X67,0x88);
-	__m256 Y7 = _mm256_permute4x64_epi64(X67,0xDD);
+	__m256 Y2 = _mm256_castsi256_ps(_mm256_permute4x64_epi64(_mm256_castps_si256(X23),0x88));
+	__m256 Y3 = _mm256_castsi256_ps(_mm256_permute4x64_epi64(_mm256_castps_si256(X23),0xDD));
+	__m256 Y6 = _mm256_castsi256_ps(_mm256_permute4x64_epi64(_mm256_castps_si256(X67),0x88));
+	__m256 Y7 = _mm256_castsi256_ps(_mm256_permute4x64_epi64(_mm256_castps_si256(X67),0xDD));
 	_mm256_store_ps(BranchMetrics+16, Y2);
 	_mm256_store_ps(BranchMetrics+24, Y3);
 	_mm256_store_ps(BranchMetrics+48, Y6);
@@ -736,7 +736,7 @@ float Viterbi::CalcBestMetric(float *Input, int& Position)
 		currentindex = _mm256_add_epi32(currentindex,Delta);
 		__m256 mask = _mm256_cmp_ps(New, BestMetrics, _CMP_LT_OQ);
 		BestMetrics = _mm256_blendv_ps(BestMetrics, New, mask);
-		bestindex = _mm256_blendv_epi8(bestindex, currentindex, mask);
+		bestindex = _mm256_blendv_epi8(bestindex, currentindex, _mm256_castps_si256(mask));
 	}
 
 	__m128 BestMetrics0 = _mm256_castps256_ps128(BestMetrics);
@@ -745,12 +745,12 @@ float Viterbi::CalcBestMetric(float *Input, int& Position)
 	__m128i bestindex1 = _mm256_extracti128_si256(bestindex, 1);
 	__m128 mask = _mm_cmp_ps(BestMetrics1, BestMetrics0, _CMP_LT_OQ);
 	BestMetrics0 = _mm_blendv_ps(BestMetrics0, BestMetrics1, mask);
-	bestindex0 = _mm_blendv_epi8(bestindex0, bestindex1, mask);
+	bestindex0 = _mm_blendv_epi8(bestindex0, bestindex1, _mm_castps_si128(mask));
 	BestMetrics1 = _mm_permute_ps (BestMetrics0, 0x1B);// 00011011
 	bestindex1 = _mm_shuffle_epi32(bestindex0, 0x1B);
 	mask = _mm_cmp_ps(BestMetrics1, BestMetrics0, _CMP_LT_OQ);
 	BestMetrics0 = _mm_blendv_ps(BestMetrics0, BestMetrics1, mask);
-	bestindex0 = _mm_blendv_epi8(bestindex0, bestindex1, mask);
+	bestindex0 = _mm_blendv_epi8(bestindex0, bestindex1, _mm_castps_si128(mask));
 	
 	alignas(32) float TwoMetrics[2];
 	alignas(32) int TwoIndexes[2];

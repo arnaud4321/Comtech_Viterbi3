@@ -9,10 +9,13 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/bin/debug/viterbi3",
+            "preLaunchTask": "Compile Debug",
             "args": ["config.json"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/src",
-            "environment": [],
+            "environment": [
+                {"name": "LD_LIBRARY_PATH", "value": "/opt/intel/oneapi/ipp/latest/lib/intel64:${env:LD_LIBRARY_PATH}"}
+            ],
             "externalConsole": false,
             "MIMode": "gdb",
             "setupCommands": [
@@ -37,7 +40,9 @@
             "args": ["config.json"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}/src",
-            "environment": [],
+            "environment": [
+                {"name": "LD_LIBRARY_PATH", "value": "/opt/intel/oneapi/ipp/latest/lib/intel64:${env:LD_LIBRARY_PATH}"}
+            ],
             "externalConsole": false,
             "MIMode": "gdb",
             "setupCommands": [
