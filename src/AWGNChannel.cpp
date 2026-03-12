@@ -48,10 +48,10 @@ void AWGNChannel::StartThreads(void)
     StablePeriod = n2 * TxOutputBatchDuration;
     TotalPeriod = 2*(AccelerationPeriod+StablePeriod);
     TransitionCounter[0] = 0; 
-    TransitionCounter[1] = n2;
-    TransitionCounter[2] = TransitionCounter[1] + n1;
-    TransitionCounter[3] = TransitionCounter[2] + n2;
-    TransitionCounter[4] = TransitionCounter[3] + n1;
+    TransitionCounter[1] = n2;//End of Stable 1
+    TransitionCounter[2] = TransitionCounter[1] + n1;//End of Acc 1
+    TransitionCounter[3] = TransitionCounter[2] + n2;//End of Stable 2
+    TransitionCounter[4] = TransitionCounter[3] + n1;//End of Acc 2
     
     
     
@@ -164,10 +164,10 @@ void AWGNChannel::GenerateOutput(void)
         __m256 mStdn = _mm256_set1_ps(Stdn);
         for(int i = 0; i < TxOutputBatchSize; )
         {
-            __m256i mInl = _mm256_loadu_si256((__m256i*)(TxOut+i));
+            __m256 mInl = _mm256_loadu_ps(TxOut+i);
             __m256 mOutl = _mm256_loadu_ps(Noise[PtrRdNoise]+i);
             i+=8;
-            __m256i mInh = _mm256_loadu_si256((__m256i*)(TxOut+i));
+            __m256 mInh = _mm256_loadu_ps((TxOut+i));
             __m256 mOuth = _mm256_loadu_ps(Noise[PtrRdNoise]+i);
             i+= 8;
             mOutl = _mm256_mul_ps(mStdn,mOutl);
