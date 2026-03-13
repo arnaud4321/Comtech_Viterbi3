@@ -29,6 +29,9 @@ private:
     int NoiseBatchSize;
     random_generator_new oNoiseGen;
     FrequencyOffset objFreqOffset;
+    float *FreqShiftBufI = nullptr;   /* de-interleave + CreateOutputs input */
+    float *FreqShiftBufQ = nullptr;
+    float *RotatedInterleaved = nullptr;  /* re-interleave for add-noise loop */
     double Stdn; 
     Transmitter *pTx;
     static constexpr int LengthQueue = 4;

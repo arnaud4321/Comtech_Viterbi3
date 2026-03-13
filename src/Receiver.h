@@ -14,10 +14,18 @@
 #include "Viterbi.h"
 #include "SelfSyncScrambler_V35.h"
 #include "Prbs23.h"
+#include "CentralFreqEstimator.h"
+#include "FrequencyOffset.h"
+#include "PhaseTracker.h"
+#include <atomic>
+#include <chrono>
+#include <mutex>
 using namespace std;
 //#define DEBUG1
 //#define DEBUG2
 #define DEBUG_STATISTICS
+#define DEBUG_FREQ_CORR  /* when defined: dump freq-corrected I,Q to data/outFreqCorr.bin (use #ifdef in code) */
+#define DEBUG_PHASE_CORR  /* when defined: dump soft symbols to data/softSymbols.bin and phase error to data/phaseError.bin */
 
 
 class Sampler;
@@ -54,6 +62,9 @@ private:
     Prbs23 oPrbs;
     SelfSyncScrambler_V35 objDescrambler;
     RxFilter objRxFilter;
+    CentralFreqEstimator objFreqEstimator;
+    FrequencyOffset objFreqCorrection;
+    PhaseTracker objPhaseTracker;
     Sampler *pSampler;
     BufferFloat oBufferFilter;
     Viterbi oViterbi[3] = {Viterbi(0),Viterbi(1),Viterbi(2)};
@@ -62,11 +73,31 @@ private:
     unsigned char *Outputs[3];
     float *OneSpsI, *OneSpsQ;
     void OperateFilter(void);
+    void OperateFreqEstimation(void);
+    void OperatePhaseTracking(void);
     int IndexViterbi[3] = {0,1,2};
     void OperateViterbiManager(void);
     void OperateViterbi(void *p);
-    thread FilterThread, ViterbiManagerThread;
+    thread FilterThread, ViterbiManagerThread, FreqEstimationThread, PhaseTrackingThread;
     thread ViterbiThreads[3];
+    float *FreqEstBufI = nullptr, *FreqEstBufQ = nullptr;
+    int FreqEstCount = 0;
+    std::mutex FreqEstMutex;
+    bool FirstEstimationDone = false;
+    FILE* FreqCorrDumpFile = nullptr;
+#ifdef DEBUG_PHASE_CORR
+    FILE* SoftSymbolsDumpFile = nullptr;
+    FILE* PhaseErrorDumpFile = nullptr;
+    FILE* PhaseEstRadDumpFile = nullptr;
+#endif
+    /* Decision-directed phase tracking: buffer for phase thread */
+    float *PhaseBufI = nullptr, *PhaseBufQ = nullptr;
+    int PhaseBufSamples = 0;
+    std::mutex PhaseBufMutex;
+    std::condition_variable PhaseBufCv;
+    std::atomic<bool> PhaseLocked{false};
+    std::atomic<float> PhaseEstRad{0.f};  /* phase correction (rad) applied in filter thread */
+    std::chrono::steady_clock::time_point LastPhaseDisplayTime;
     ViterbiSyncResults VitSyncResults[3];
     float *FilterInI,  *FilterInQ;
     void shorts_to_floats_avx2(__m256i v16, __m256* out0, __m256* out1);

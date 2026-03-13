@@ -15,6 +15,10 @@ AWGNChannel::AWGNChannel(unsigned int Seed):NoiseQ(LengthQueue),OutputBuffer(128
     {
         Noise[i] = Noise[i-1] + TxOutputBatchSize;
     }
+    const unsigned int NumComplex = TxOutputBatchSize / 2;
+    FreqShiftBufI = (float *) _mm_malloc(NumComplex * sizeof(float), 32);
+    FreqShiftBufQ = (float *) _mm_malloc(NumComplex * sizeof(float), 32);
+    RotatedInterleaved = (float *) _mm_malloc(TxOutputBatchSize * sizeof(float), 32);
     #ifdef DEBUG_AWGN
         OutAllI = (short *) _mm_malloc( 20000000*sizeof(short),32);
     #endif
@@ -22,6 +26,9 @@ AWGNChannel::AWGNChannel(unsigned int Seed):NoiseQ(LengthQueue),OutputBuffer(128
 
 AWGNChannel::~AWGNChannel()
 {
+    if (FreqShiftBufI) _mm_free(FreqShiftBufI);
+    if (FreqShiftBufQ) _mm_free(FreqShiftBufQ);
+    if (RotatedInterleaved) _mm_free(RotatedInterleaved);
     _mm_free(Noise[0]);
     #ifdef DEBUG_AWGN
         _mm_free(OutAllI);
@@ -52,9 +59,10 @@ void AWGNChannel::StartThreads(void)
     TransitionCounter[2] = TransitionCounter[1] + n1;//End of Acc 1
     TransitionCounter[3] = TransitionCounter[2] + n2;//End of Stable 2
     TransitionCounter[4] = TransitionCounter[3] + n1;//End of Acc 2
-    
-    
-    
+
+    objFreqOffset.SetSamplingFrequency(SamplingRate);
+    objFreqOffset.SetFrequency(static_cast<Ipp64f>(pParams->FrequencyShift));
+
     NoiseQ.Reset();
     NoiseThread = std::thread(&AWGNChannel::GenerateNoise, this);
     OutputThread = std::thread(&AWGNChannel::GenerateOutput, this);
@@ -158,16 +166,30 @@ void AWGNChannel::GenerateOutput(void)
         }
         if(StopAll)
             break;
+
+        const unsigned int NumComplex = TxOutputBatchSize / 2;
+        for (unsigned int i = 0; i < NumComplex; i++)
+        {
+            FreqShiftBufI[i] = TxOut[2*i];
+            FreqShiftBufQ[i] = TxOut[2*i + 1];
+        }
+        objFreqOffset.CreateOutputs(FreqShiftBufI, FreqShiftBufQ, NumComplex);
+        for (unsigned int i = 0; i < NumComplex; i++)
+        {
+            RotatedInterleaved[2*i]   = FreqShiftBufI[i];
+            RotatedInterleaved[2*i+1] = FreqShiftBufQ[i];
+        }
+
         short *Output = OutputBuffer.GetWriteBuffer(TxOutputBatchSize);
-        
+        float *SigIn = RotatedInterleaved;
         unsigned int PtrOut = 0;
         __m256 mStdn = _mm256_set1_ps(Stdn);
         for(int i = 0; i < TxOutputBatchSize; )
         {
-            __m256 mInl = _mm256_loadu_ps(TxOut+i);
+            __m256 mInl = _mm256_loadu_ps(SigIn+i);
             __m256 mOutl = _mm256_loadu_ps(Noise[PtrRdNoise]+i);
             i+=8;
-            __m256 mInh = _mm256_loadu_ps((TxOut+i));
+            __m256 mInh = _mm256_loadu_ps((SigIn+i));
             __m256 mOuth = _mm256_loadu_ps(Noise[PtrRdNoise]+i);
             i+= 8;
             mOutl = _mm256_mul_ps(mStdn,mOutl);

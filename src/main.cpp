@@ -47,7 +47,7 @@ int main(int argc, char* argv[])
 	objSampler.StartThread();
 	Receiver oRx;
 	oRx.SetSampler(&objSampler);
-	oRx.StartThreads(objParams.RollOff,objParams.TxMode);
+	oRx.StartThreads(objParams.RollOff, objParams.TxMode);
 	
 	auto Start = std::chrono::high_resolution_clock::now();
 

@@ -1,4 +1,9 @@
 #include "Receiver.h"
+#include <chrono>
+#include <vector>
+#include <iostream>
+#include <cmath>
+#include <sys/stat.h>
 extern std::mutex mtxfilethr;
 Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB),OutputQ(LengthQueue)
 {
@@ -24,6 +29,10 @@ Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB),OutputQ(LengthQueue
     Merged = (unsigned char *) _mm_malloc((BatchSize3),32);
     OutputAll = (unsigned char *) _mm_malloc((BatchSize3)*LengthQueue,32);
     PrbsOut = (unsigned char *) _mm_malloc((BatchSize3),32);
+    FreqEstBufI = (float*) _mm_malloc(FreqEstimatorSamples * sizeof(float), 32);
+    FreqEstBufQ = (float*) _mm_malloc(FreqEstimatorSamples * sizeof(float), 32);
+    PhaseBufI = (float*) _mm_malloc(SPB * sizeof(float), 32);
+    PhaseBufQ = (float*) _mm_malloc(SPB * sizeof(float), 32);
 
     #ifdef DEBUG1
     OutAllI = (float*) _mm_malloc( (NUM_SAMPLES_R1+100000)*sizeof(float),32);
@@ -41,6 +50,10 @@ Receiver::~Receiver()
     _mm_free(Merged);
     _mm_free(OutputAll);
     _mm_free(PrbsOut);
+    if (FreqEstBufI) _mm_free(FreqEstBufI);
+    if (FreqEstBufQ) _mm_free(FreqEstBufQ);
+    if (PhaseBufI) _mm_free(PhaseBufI);
+    if (PhaseBufQ) _mm_free(PhaseBufQ);
 
     for(int i = 0; i < 3; i++)
     {
@@ -55,6 +68,14 @@ Receiver::~Receiver()
         _mm_free(OutAllI);
         _mm_free(OutAllQ);
     #endif
+#ifdef DEBUG_FREQ_CORR
+    if (FreqCorrDumpFile) { fclose(FreqCorrDumpFile); FreqCorrDumpFile = nullptr; }
+#endif
+#ifdef DEBUG_PHASE_CORR
+    if (SoftSymbolsDumpFile) { fclose(SoftSymbolsDumpFile); SoftSymbolsDumpFile = nullptr; }
+    if (PhaseErrorDumpFile) { fclose(PhaseErrorDumpFile); PhaseErrorDumpFile = nullptr; }
+    if (PhaseEstRadDumpFile) { fclose(PhaseEstRadDumpFile); PhaseEstRadDumpFile = nullptr; }
+#endif
 
 }
 void Receiver::StartThreads(double RollOff, TxModes RxModeIn)
@@ -64,12 +85,19 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn)
     objRxFilter.CreateObjects(RollOff);
     ViterbiSynchronized = false;
     PRBSSynchronized = false;
+    FirstEstimationDone = false;
+    PhaseLocked = false;   /* TEMP: force true to avoid discarding blocks; revert to false to test if BER is due to lost PRBS sync */
+    PhaseEstRad = 0.f;
+    LastPhaseDisplayTime = std::chrono::steady_clock::now();
     for(int i = 0; i < 3; i++)
     {
         DemodulatorQ[i].Reset();
         DecodedQ[i].Reset();
     }
-
+    objFreqEstimator.SetSamplingFrequency(SamplingFrequency);
+    objFreqCorrection.SetSamplingFrequency(SamplingFrequency);
+    FreqEstimationThread = std::thread(&Receiver::OperateFreqEstimation, this);
+    PhaseTrackingThread = std::thread(&Receiver::OperatePhaseTracking, this);
     FilterThread = std::thread(&Receiver::OperateFilter, this);
     ViterbiManagerThread = std::thread(&Receiver::OperateViterbiManager, this);
 
@@ -82,10 +110,23 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn)
 void Receiver::StopThreads(void)
 {
     StopAll = true;
+#ifdef DEBUG_FREQ_CORR
+    if (FreqCorrDumpFile) { fclose(FreqCorrDumpFile); FreqCorrDumpFile = nullptr; }
+#endif
+#ifdef DEBUG_PHASE_CORR
+    if (SoftSymbolsDumpFile) { fclose(SoftSymbolsDumpFile); SoftSymbolsDumpFile = nullptr; }
+    if (PhaseErrorDumpFile) { fclose(PhaseErrorDumpFile); PhaseErrorDumpFile = nullptr; }
+    if (PhaseEstRadDumpFile) { fclose(PhaseEstRadDumpFile); PhaseEstRadDumpFile = nullptr; }
+#endif
     CvRx2Out.notify_all();
     CvOut2Rx.notify_all();
     CvVitManager2Vit.notify_all();
     CvFilterUser.notify_all();
+    PhaseBufCv.notify_all();
+    if (FreqEstimationThread.joinable())
+        FreqEstimationThread.join();
+    if (PhaseTrackingThread.joinable())
+        PhaseTrackingThread.join();
     if(FilterThread.joinable())
     FilterThread.join();
     for(int i = 0; i < 3;i++)
@@ -141,8 +182,167 @@ void Receiver::OperateFilter(void)
         float *FilterOutI, *FilterOutQ;
         oBufferFilter.GetWriteBuffer(FilterOutI,FilterOutQ,SPB);
         objRxFilter.CreateOutputs(FilterInI,FilterInQ,FilterOutI,FilterOutQ,SPB);
-        oBufferFilter.AdvancePtrWr(SPB);
-        CvFilterUser.notify_one();
+        {
+            std::lock_guard<std::mutex> lock(FreqEstMutex);
+            if (FreqEstCount + SPB <= FreqEstimatorSamples && FreqEstBufI && FreqEstBufQ)
+            {
+                for (int i = 0; i < SPB; i++)
+                {
+                    FreqEstBufI[FreqEstCount + i] = FilterOutI[i];
+                    FreqEstBufQ[FreqEstCount + i] = FilterOutQ[i];
+                }
+                FreqEstCount += SPB;
+                if (FreqEstCount >= FreqEstimatorSamples && !FirstEstimationDone)
+                {
+                    std::vector<float> localI(FreqEstimatorSamples), localQ(FreqEstimatorSamples);
+                    for (int i = 0; i < FreqEstimatorSamples; i++)
+                    {
+                        localI[i] = FreqEstBufI[i];
+                        localQ[i] = FreqEstBufQ[i];
+                    }
+                    FreqEstCount = 0;
+                    FirstEstimationDone = true;
+                    objFreqEstimator.RunEstimation(localI.data(), localQ.data(), FreqEstimatorSamples);
+                }
+            }
+        }
+        if (FirstEstimationDone)
+        {
+            objFreqCorrection.SetFrequency(static_cast<Ipp64f>(-objFreqEstimator.GetEstimatedOffsetHz()));
+            objFreqCorrection.CreateOutputs(FilterOutI, FilterOutQ, SPB);
+            /* Feed phase tracker (freq-corrected copy before phase rotation) */
+            if (PhaseBufI && PhaseBufQ)
+            {
+                for (int i = 0; i < SPB; i++)
+                {
+                    PhaseBufI[i] = FilterOutI[i];
+                    PhaseBufQ[i] = FilterOutQ[i];
+                }
+                {
+                    std::lock_guard<std::mutex> lock(PhaseBufMutex);
+                    PhaseBufSamples = SPB;
+                }
+                PhaseBufCv.notify_one();
+            }
+            /* Apply phase correction: rotate by -PhaseEstRad (set by phase thread) */
+            float p = PhaseEstRad.load(std::memory_order_relaxed);
+            float cp = std::cos(p), sp = std::sin(p);
+            for (int i = 0; i < SPB; i++)
+            {
+                float i0 = FilterOutI[i], q0 = FilterOutQ[i];
+                FilterOutI[i] = i0 * cp - q0 * sp;
+                FilterOutQ[i] = i0 * sp + q0 * cp;
+            }
+#ifdef DEBUG_FREQ_CORR
+            if (!FreqCorrDumpFile)
+            {
+                mkdir("../data", 0755);
+                FreqCorrDumpFile = fopen("../data/outFreqCorr.bin", "wb");
+            }
+            if (FreqCorrDumpFile)
+            {
+                for (int i = 0; i < SPB; i++)
+                {
+                    fwrite(&FilterOutI[i], sizeof(float), 1, FreqCorrDumpFile);
+                    fwrite(&FilterOutQ[i], sizeof(float), 1, FreqCorrDumpFile);
+                }
+            }
+#endif
+            oBufferFilter.AdvancePtrWr(SPB);
+            CvFilterUser.notify_one();
+        }
+    }
+}
+
+void Receiver::OperatePhaseTracking(void)
+{
+    std::vector<float> localI(SPB), localQ(SPB);
+    while (!StopAll)
+    {
+        int n = 0;
+        {
+            std::unique_lock<std::mutex> lock(PhaseBufMutex);
+            PhaseBufCv.wait_for(lock, std::chrono::milliseconds(50), [this] { return PhaseBufSamples > 0 || StopAll; });
+            if (StopAll)
+                break;
+            if (PhaseBufSamples > 0 && PhaseBufI && PhaseBufQ)
+            {
+                n = PhaseBufSamples;
+                for (int i = 0; i < n; i++)
+                {
+                    localI[i] = PhaseBufI[i];
+                    localQ[i] = PhaseBufQ[i];
+                }
+                PhaseBufSamples = 0;
+            }
+        }
+        if (n > 0)
+        {
+            objPhaseTracker.Update(localI.data(), localQ.data(), n);
+            PhaseEstRad.store(objPhaseTracker.GetPhaseEst(), std::memory_order_relaxed);
+            PhaseLocked.store(objPhaseTracker.IsLocked(), std::memory_order_relaxed);
+#ifdef DEBUG_PHASE_CORR
+            if (!PhaseErrorDumpFile)
+            {
+                mkdir("../data", 0755);
+                PhaseErrorDumpFile = fopen("../data/phaseError.bin", "wb");
+                PhaseEstRadDumpFile = fopen("../data/phaseEstRad.bin", "wb");
+            }
+            if (PhaseErrorDumpFile)
+            {
+                float err = objPhaseTracker.GetFilteredError();
+                fwrite(&err, sizeof(float), 1, PhaseErrorDumpFile);
+            }
+            if (PhaseEstRadDumpFile)
+            {
+                float prad = objPhaseTracker.GetPhaseEst();
+                fwrite(&prad, sizeof(float), 1, PhaseEstRadDumpFile);
+            }
+#endif
+            /* Display phase lock status and residual phase error every second */
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - LastPhaseDisplayTime).count() >= 1.0)
+            {
+                float err = objPhaseTracker.GetFilteredError();
+                float thresh = objPhaseTracker.GetLockThreshold();
+                bool locked = objPhaseTracker.IsLocked();
+                std::cout << "Phase: " << (locked ? "LOCKED" : "not locked")
+                          << " (filtered error " << err << " rad "
+                          << (locked ? "<" : ">=") << " threshold " << thresh << " rad)"
+                          << " | residual phase error: " << err << " rad" << std::endl;
+                LastPhaseDisplayTime = now;
+            }
+        }
+    }
+}
+
+void Receiver::OperateFreqEstimation(void)
+{
+    std::vector<float> localI(FreqEstimatorSamples), localQ(FreqEstimatorSamples);
+    while (!StopAll)
+    {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (StopAll)
+            break;
+        int n = 0;
+        {
+            std::lock_guard<std::mutex> lock(FreqEstMutex);
+            n = FreqEstCount;
+            if (n >= FreqEstimatorSamples && FreqEstBufI && FreqEstBufQ)
+            {
+                for (int i = 0; i < FreqEstimatorSamples; i++)
+                {
+                    localI[i] = FreqEstBufI[i];
+                    localQ[i] = FreqEstBufQ[i];
+                }
+                FreqEstCount = 0;
+            }
+        }
+        if (n >= FreqEstimatorSamples)
+        {
+            objFreqEstimator.RunEstimation(localI.data(), localQ.data(), FreqEstimatorSamples);
+            std::cout << "Central frequency (estimated): " << objFreqEstimator.GetEstimatedOffsetHz() << " Hz" << std::endl;
+        }
     }
 }
 
@@ -299,7 +499,7 @@ void Receiver::OperateViterbiManager(void)
 
         if(First)
             First = false;
-        else
+        else if (PhaseLocked.load(std::memory_order_relaxed))
         {
             TakeEvenDebug(FilterOutI, OneSpsI, ReceiverInputBatchIQSamples);
             TakeEvenDebug(FilterOutQ, OneSpsQ, ReceiverInputBatchIQSamples);
@@ -329,6 +529,21 @@ void Receiver::OperateViterbiManager(void)
             Split3(OneSpsI, OneSpsQ, ReceiverInputBatchIQSymbols,PtrWr*BatchSize1);
             if(StopAll)
                 break;
+#ifdef DEBUG_PHASE_CORR
+            if (!SoftSymbolsDumpFile)
+            {
+                mkdir("../data", 0755);
+                SoftSymbolsDumpFile = fopen("../data/softSymbols.bin", "wb");
+            }
+            if (SoftSymbolsDumpFile)
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    fwrite(SplitI[i] + PtrWr * BatchSize1, sizeof(float), BatchSize1, SoftSymbolsDumpFile);
+                    fwrite(SplitQ[i] + PtrWr * BatchSize1, sizeof(float), BatchSize1, SoftSymbolsDumpFile);
+                }
+            }
+#endif
             if(ViterbiSynchronized == false)
             {
                 for(int i = 0; i < 3; i++)

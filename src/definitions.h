@@ -11,6 +11,8 @@ const int ReceiverInputBatchIQSamples = BatchSize3 * 2; //BatchSize3 x2 (conv) /
 const int ReceiverInputBatchIQSymbols = BatchSize3;
 const int SPB = 8192;
 const double SamplingFrequency = 21.42e6;
+/** Samples per central-freq estimation (~10 Hz resolution). */
+const int FreqEstimatorSamples = ((int)(SamplingFrequency / 10.0 / SPB)) * SPB;
 
 enum TxModes
 { PRBS_TX,FILE_TX};

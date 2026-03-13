@@ -1,6 +1,7 @@
 #include "Sampler.h"
 #include "AWGNChannel.h"
 #include <thread>
+#include <iostream>
 extern bool Finish;
 Sampler::Sampler(bool DebugIn):Debug(DebugIn),oBuffer(128*SPB,2*SPB)
 { 
@@ -39,6 +40,7 @@ void Sampler::OperateSampler(void)
     condition_variable *pCvFromCh, *pCvToCh;
     pChannel->GetCvs2User(pCvToCh, pCvFromCh);//the function is defined from the point of view of Channel
     auto Start = std::chrono::high_resolution_clock::now();
+    auto LastDisplayTime = Start;
     while(!StopAll)
     {
         short *ChOut = pChannel->GetOutput(SPB*2);
@@ -89,7 +91,16 @@ void Sampler::OperateSampler(void)
         }
         CvSamplerUser.notify_one();
         NumBatches++;
-        //cout<<"Sampler Batch "<<NumBatches<<endl;
+        auto TimeEnd = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> sinceLastDisplay = TimeEnd - LastDisplayTime;
+        if (sinceLastDisplay.count() >= 1.0)
+        {
+            std::chrono::duration<double> elapsed = TimeEnd - Start;
+            double totalSamples = NumBatches * static_cast<double>(SPB);
+            double avgMsps = (elapsed.count() > 0) ? (totalSamples / elapsed.count() / 1e6) : 0;
+            std::cout << "Sampler: average " << avgMsps << " Msps" << std::endl;
+            LastDisplayTime = TimeEnd;
+        }
     }
 }
 
