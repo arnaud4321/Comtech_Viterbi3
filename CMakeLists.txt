@@ -62,7 +62,7 @@ SET_TARGET_PROPERTIES(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
 set(IPP_ROOT "/opt/intel/oneapi/ipp/latest" CACHE PATH "Intel IPP installation directory")
 target_include_directories(${PROJECT_NAME} PUBLIC src ${IPP_ROOT}/include/ipp)
 target_link_directories(${PROJECT_NAME} PRIVATE ${IPP_ROOT}/lib/intel64)
-target_link_libraries(${PROJECT_NAME} uhd pthread boost_system boost_program_options ipps ippcore)
+target_link_libraries(${PROJECT_NAME} uhd pthread boost_system boost_program_options ipps ippcore fftw3f)
 
 # Lien symbolique pour que clangd trouve compile_commands.json à la racine (Ctrl+F12)
 execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json

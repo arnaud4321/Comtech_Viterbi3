@@ -1,10 +1,9 @@
 #pragma once
-#include "json.hpp"
 #include <string>
 using namespace std;
-#include <fstream>
 #include "definitions.h"
 #include <immintrin.h>
+#include "SymbolRateEstimator.h"
 
 class Params
 {
@@ -23,5 +22,6 @@ public:
     unsigned int NumErrors;
     unsigned int Seed;
     bool Debug;
+    SymbolRateEstimatorConfig SymRateCfg;
 
 };

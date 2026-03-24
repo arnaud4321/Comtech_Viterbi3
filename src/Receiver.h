@@ -14,6 +14,8 @@
 #include "Viterbi.h"
 #include "SelfSyncScrambler_V35.h"
 #include "Prbs23.h"
+#include "SymbolRateEstimator.h"
+#include <atomic>
 using namespace std;
 //#define DEBUG1
 //#define DEBUG2
@@ -54,6 +56,15 @@ private:
     Prbs23 oPrbs;
     SelfSyncScrambler_V35 objDescrambler;
     RxFilter objRxFilter;
+    SymbolRateEstimator objSymRateEstimator;
+    std::atomic<bool> SymbolRateDetected{false};
+    std::atomic<double> SymbolRateEstimateHz{0.0};
+    int SymRateWindowBatches = 0;
+    int SymRateBatchCounter = 0;
+    int SymRateAcceptedCount = 0;
+    double SymRateEstimatePeriodSec = 1.0;
+    double SymRatePeakToMedianThreshold = 8.0;
+    double SymRateMaxRelativeJump = 0.02;
     Sampler *pSampler;
     BufferFloat oBufferFilter;
     Viterbi oViterbi[3] = {Viterbi(0),Viterbi(1),Viterbi(2)};
@@ -103,7 +114,8 @@ public:
     {
         pSampler = p;
     }
-    void StartThreads(double RollOff, TxModes RxModeIn);
+    void StartThreads(double RollOff, TxModes RxModeIn,
+                      const SymbolRateEstimatorConfig& symRateCfg = SymbolRateEstimatorConfig{});
     void StopThreads(void);
     unsigned char *GetOutput()
     {

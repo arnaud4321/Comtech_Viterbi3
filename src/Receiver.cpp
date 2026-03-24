@@ -1,4 +1,9 @@
 #include "Receiver.h"
+#include <chrono>
+#include <iostream>
+#include <algorithm>
+#include <cmath>
+
 extern std::mutex mtxfilethr;
 Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB),OutputQ(LengthQueue)
 {
@@ -57,7 +62,8 @@ Receiver::~Receiver()
     #endif
 
 }
-void Receiver::StartThreads(double RollOff, TxModes RxModeIn)
+void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
+                            const SymbolRateEstimatorConfig& symRateCfg)
 {
     RxMode = RxModeIn;
     oBufferFilter.Reset();
@@ -69,6 +75,15 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn)
         DemodulatorQ[i].Reset();
         DecodedQ[i].Reset();
     }
+    SymRatePeakToMedianThreshold = symRateCfg.PeakToMedianThreshold;
+    SymRateMaxRelativeJump = symRateCfg.MaxRelativeJump;
+    SymRateEstimatePeriodSec = std::max(0.01, symRateCfg.EstimatePeriodSec);
+    objSymRateEstimator.Reset(SamplingFrequency, symRateCfg.FftSize, symRateCfg.MaxOffsetHz);
+    SymRateWindowBatches = objSymRateEstimator.GetRequiredBatches(SPB);
+    SymRateBatchCounter = 0;
+    SymRateAcceptedCount = 0;
+    SymbolRateDetected.store(false, std::memory_order_relaxed);
+    SymbolRateEstimateHz.store(0.0, std::memory_order_relaxed);
 
     FilterThread = std::thread(&Receiver::OperateFilter, this);
     ViterbiManagerThread = std::thread(&Receiver::OperateViterbiManager, this);
@@ -87,7 +102,7 @@ void Receiver::StopThreads(void)
     CvVitManager2Vit.notify_all();
     CvFilterUser.notify_all();
     if(FilterThread.joinable())
-    FilterThread.join();
+        FilterThread.join();
     for(int i = 0; i < 3;i++)
         CvViterbis2VitManager[i].notify_one();
     for(int i = 0; i < 3;i++)
@@ -101,7 +116,12 @@ void Receiver::StopThreads(void)
 
 void Receiver::OperateFilter(void)
 {
-
+    auto throughput_window_start = std::chrono::steady_clock::now();
+    uint64_t samples_in_window = 0;
+    auto symrate_display_start = std::chrono::steady_clock::now();
+    auto next_symrate_start = std::chrono::steady_clock::now();
+    bool symrate_collecting = false;
+    
     #ifdef WRITE_LOG_THR
 	mtxfilethr.lock();
     FILE *fidthr = fopen("LogThreadsInfo.txt","at");
@@ -141,7 +161,88 @@ void Receiver::OperateFilter(void)
         float *FilterOutI, *FilterOutQ;
         oBufferFilter.GetWriteBuffer(FilterOutI,FilterOutQ,SPB);
         objRxFilter.CreateOutputs(FilterInI,FilterInQ,FilterOutI,FilterOutQ,SPB);
+        auto now_sym = std::chrono::steady_clock::now();
+        if (!symrate_collecting && now_sym >= next_symrate_start)
+        {
+            symrate_collecting = true;
+            SymRateBatchCounter = 0;
+            next_symrate_start += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(SymRateEstimatePeriodSec));
+            while (next_symrate_start <= now_sym)
+            {
+                next_symrate_start += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(SymRateEstimatePeriodSec));
+            }
+        }
+
+        if (symrate_collecting)
+        {
+            const bool ready = objSymRateEstimator.PushBatch(FilterOutI, FilterOutQ, SPB);
+            SymRateBatchCounter++;
+            if (ready)
+            {
+                SymbolRateEstimateResult est = objSymRateEstimator.RunEstimation();
+                if (!SymbolRateDetected.load(std::memory_order_relaxed))
+                {
+                    if (est.Detected)
+                    {
+                        SymbolRateEstimateHz.store(est.SymbolRateHz, std::memory_order_relaxed);
+                        SymbolRateDetected.store(true, std::memory_order_relaxed);
+                        SymRateAcceptedCount = 1;
+                        std::cout << "Symbol rate detected: " << (est.SymbolRateHz / 1e6)
+                                  << " Msym/s (FFT res " << est.FftResolutionHz
+                                  << " Hz, peak/median " << est.PeakToMedian << ")" << std::endl;
+                    }
+                }
+                else if (est.Detected)
+                {
+                    const double prev = SymbolRateEstimateHz.load(std::memory_order_relaxed);
+                    const double rel = std::abs(est.SymbolRateHz - prev) / std::max(1.0, prev);
+                    if (est.PeakToMedian >= SymRatePeakToMedianThreshold && rel <= SymRateMaxRelativeJump)
+                    {
+                        const double alpha = 1.0 / static_cast<double>(std::max(2, SymRateAcceptedCount + 1));
+                        const double refined = (1.0 - alpha) * prev + alpha * est.SymbolRateHz;
+                        SymbolRateEstimateHz.store(refined, std::memory_order_relaxed);
+                        SymRateAcceptedCount++;
+                    }
+                }
+                symrate_collecting = false;
+                SymRateBatchCounter = 0;
+            }
+        }
+        if (std::chrono::duration<double>(now_sym - symrate_display_start).count() >= 1.0)
+        {
+            if (SymbolRateDetected.load(std::memory_order_relaxed))
+            {
+                std::cout << "Current symbol rate estimate: "
+                          << (SymbolRateEstimateHz.load(std::memory_order_relaxed) / 1e6)
+                          << " Msym/s (window " << SymRateWindowBatches << " batches)" << std::endl;
+            }
+            else
+            {
+                std::cout << "Waiting for symbol-rate detection..." << std::endl;
+            }
+            symrate_display_start = now_sym;
+        }
+
+        if (!SymbolRateDetected.load(std::memory_order_relaxed))
+            continue; // signal not detected yet: block subsequent processing
+
         oBufferFilter.AdvancePtrWr(SPB);
+
+        samples_in_window += SPB;  // SPB complex samples processed this iteration
+
+        auto now_tp = std::chrono::steady_clock::now();
+        double dt = std::chrono::duration<double>(now_tp - throughput_window_start).count();
+        if (dt >= 1.0)
+        {
+            double msps = static_cast<double>(samples_in_window) / dt / 1e6;
+            std::cout << "RX Filter throughput: " << msps << " Msps" << std::endl;
+        
+            throughput_window_start = now_tp;
+            samples_in_window = 0;
+        }
+
         CvFilterUser.notify_one();
     }
 }

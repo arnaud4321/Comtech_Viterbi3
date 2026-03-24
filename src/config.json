@@ -6,7 +6,7 @@
     "FileName": ""
   },
   "Channel": {
-    "Esn0": 100,
+    "Esn0": 50,
     "Drift": 0,
     "FrequencyShift": 23333,
     "AccelerationPeriod":40,
@@ -17,6 +17,13 @@
     "Method":0,
     "NumErrors": 1000,
     "Seed": 132345,
-    "Debug":1
+    "Debug":0
+  },
+  "SymbolRateEstimator": {
+    "FftSize": 65536,
+    "MaxOffsetHz": 200000,
+    "EstimatePeriodSec": 1.0,
+    "PeakToMedianThreshold": 8.0,
+    "MaxRelativeJump": 0.02
   }
 }

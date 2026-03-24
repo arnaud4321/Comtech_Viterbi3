@@ -1,4 +1,7 @@
 #include "Params.h"
+#include "json.hpp"
+#include <fstream>
+
 Params::Params()
 {
 
@@ -48,5 +51,15 @@ void Params::ReadParams(string FileName)
         Debug = false;
     else
         Debug = true;
+
+    if (j.contains("SymbolRateEstimator"))
+    {
+        const auto& s = j["SymbolRateEstimator"];
+        if (s.contains("FftSize")) SymRateCfg.FftSize = s["FftSize"];
+        if (s.contains("MaxOffsetHz")) SymRateCfg.MaxOffsetHz = s["MaxOffsetHz"];
+        if (s.contains("EstimatePeriodSec")) SymRateCfg.EstimatePeriodSec = s["EstimatePeriodSec"];
+        if (s.contains("PeakToMedianThreshold")) SymRateCfg.PeakToMedianThreshold = s["PeakToMedianThreshold"];
+        if (s.contains("MaxRelativeJump")) SymRateCfg.MaxRelativeJump = s["MaxRelativeJump"];
+    }
 
 }
