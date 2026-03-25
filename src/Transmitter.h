@@ -2,6 +2,7 @@
 #include <immintrin.h>
 #include <thread>
 #include <condition_variable>
+#include <mutex>
 #include <string>
 using namespace std;
 #include "definitions.h"
@@ -46,6 +47,8 @@ class Transmitter
     bool StopAll = false;
     SimpleQueue DataQ, FilterQ;
     condition_variable CvFilterData, CvDataFilter, CvOutFilter, CvFilterOut;
+    std::mutex mtxDataQ_;
+    std::mutex mtxFilterQ_;
 
     void GenerateData(void);
     void FilterData(void);
@@ -60,8 +63,15 @@ public:
 	float *GetOutput(void);
     void AdvanceOut(void)
     {
-        FilterQ.AdvanceRead();
+        {
+            std::lock_guard<std::mutex> lk(mtxFilterQ_);
+            FilterQ.AdvanceRead();
+        }
+        CvOutFilter.notify_one();
     }
+    // Atomic copy (internal mutex) from the TX output FIFO (FilterQ).
+    // Returns false if stopAll becomes true while waiting.
+    bool CopyOutputSamples(float* dst, int nFloats, bool& stopAll);
     void GetCVOut(condition_variable* &CVIn, condition_variable* &CVOut )
     {
         CVIn = &CvOutFilter;

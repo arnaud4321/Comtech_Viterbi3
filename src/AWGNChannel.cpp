@@ -1,5 +1,6 @@
 #include "AWGNChannel.h"
 #include "Transmitter.h"
+#include <cstring>
 extern bool Finish;
 extern mutex mtxfilethr;
 AWGNChannel::AWGNChannel(unsigned int Seed):NoiseQ(LengthQueue),OutputBuffer(128*TxOutputBatchSize,2*TxOutputBatchSize)
@@ -90,21 +91,19 @@ void AWGNChannel::GenerateNoise(void)
     #endif
     while(!StopAll)
     {
-        while(!NoiseQ.AvailableWrite())
         {
-            std::mutex mtx;
-            std::unique_lock<std::mutex> lck(mtx);
-            CvOutNoise.wait(lck);
+            std::unique_lock<std::mutex> lk(mtxNoiseQ_);
+            CvOutNoise.wait(lk, [&] { return StopAll || NoiseQ.AvailableWrite(); });
         }
 
         
         if(StopAll)
             break;
+        std::unique_lock<std::mutex> lk(mtxNoiseQ_);
         unsigned int PtrWr = NoiseQ.GetPtrWr();
-        
         oNoiseGen.randn(Noise[PtrWr],NoiseBatchSize);
-
         NoiseQ.AdvanceWrite();
+        lk.unlock();
         CvNoiseOut.notify_one();
     }
 }
@@ -119,92 +118,96 @@ void AWGNChannel::GenerateOutput(void)
     fclose(fidthr);
     mtxfilethr.unlock();
     #endif
-    condition_variable *pCvTxChn, *pCvChnTx;
-
-    pTx->GetCVOut(pCvChnTx, pCvTxChn );
-
     int NumSamples = 0;
    
     while(!StopAll)
     {
-        while((!NoiseQ.AvailableRead())&& (StopAll==false))
         {
-            std::mutex mtx;
-            std::unique_lock<std::mutex> lck(mtx);
-            CvNoiseOut.wait(lck);
+            std::unique_lock<std::mutex> lk(mtxNoiseQ_);
+            CvNoiseOut.wait(lk, [&] { return StopAll || NoiseQ.AvailableRead(); });
         }
 
         if(StopAll)
             break;
+        std::unique_lock<std::mutex> lkNoise(mtxNoiseQ_);
         unsigned int PtrRdNoise = NoiseQ.GetPtrRd();
 
-        float *TxOut = pTx->GetOutput();
-
-        while((TxOut == 0) && (StopAll == false))
-        {
-            std::mutex mtx;
-            std::unique_lock<std::mutex> lck(mtx);
-            pCvTxChn->wait(lck);
-            TxOut = pTx->GetOutput();
-        }
-        if(StopAll)
+        alignas(32) float txChunk[TxOutputBatchSize];
+        if (!pTx->CopyOutputSamples(txChunk, TxOutputBatchSize, StopAll))
             break;
 
-        while(OutputBuffer.AlmostFull() && (StopAll == false))//If buffer is almost full - wait
         {
-            std::mutex mtx;
-            std::unique_lock<std::mutex> lck(mtx);
-            CvUserOut.wait(lck);
-        }
-        if(StopAll)
-            break;
-        short *Output = OutputBuffer.GetWriteBuffer(TxOutputBatchSize);
-        
-        unsigned int PtrOut = 0;
-        __m256 mStdn = _mm256_set1_ps(Stdn);
-        for(int i = 0; i < TxOutputBatchSize; )
-        {
-            __m256 mInl = _mm256_loadu_ps(TxOut+i);
-            __m256 mOutl = _mm256_loadu_ps(Noise[PtrRdNoise]+i);
-            i+=8;
-            __m256 mInh = _mm256_loadu_ps((TxOut+i));
-            __m256 mOuth = _mm256_loadu_ps(Noise[PtrRdNoise]+i);
-            i+= 8;
-            mOutl = _mm256_mul_ps(mStdn,mOutl);
-            mOuth = _mm256_mul_ps(mStdn,mOuth);
-            
-            mOutl = _mm256_fmadd_ps(mInl, mkSig , mOutl);
-            mOuth = _mm256_fmadd_ps(mInh, mkSig , mOuth);
-            
-            __m256i mOuti =  floats_to_shorts_sat_perm_avx2(mOutl,mOuth);
-            _mm256_storeu_si256((__m256i*)(Output+PtrOut),mOuti);
-            PtrOut += 16;
-        }
-        NumSamples += PtrOut;
-        //        cout<<"AWGN "<<NumSamples<<" "<<Output[0]<<" "<<Output[1]<<endl;
+            std::unique_lock<std::mutex> lk(mtxOutputBuffer_);
+            while (OutputBuffer.AlmostFull() && !StopAll)
+                CvUserOut.wait(lk); 
+            if (StopAll)
+                break;
+            short* Output = OutputBuffer.GetWriteBuffer(TxOutputBatchSize);
 
- # ifdef DEBUG_AWGN
-        std::copy(Output,Output+TxOutputBatchSize,OutAllI+PtrOutAll);
-        PtrOutAll += TxOutputBatchSize;
-        cout<<"Collected "<<PtrOutAll<<endl;
-        if(PtrOutAll >= 1100000)
-        {    
-            FILE *fid = fopen("AWGNOut.bin","wb");
-            fwrite(OutAllI,sizeof(short),PtrOutAll,fid);
-            fclose(fid);
-            cout<<"Saved AWGN "<<PtrOutAll<<endl;
-            std::this_thread::sleep_for(10ms);
+            unsigned int PtrOut = 0;
+            __m256 mStdn = _mm256_set1_ps(Stdn);
+            for (int i = 0; i < TxOutputBatchSize;)
+            {
+                __m256 mInl = _mm256_loadu_ps(txChunk + i);
+                __m256 mOutl = _mm256_loadu_ps(Noise[PtrRdNoise] + i);
+                i += 8;
+                __m256 mInh = _mm256_loadu_ps((txChunk + i));
+                __m256 mOuth = _mm256_loadu_ps(Noise[PtrRdNoise] + i);
+                i += 8;
+                mOutl = _mm256_mul_ps(mStdn, mOutl);
+                mOuth = _mm256_mul_ps(mStdn, mOuth);
 
-            Finish = true;
+                mOutl = _mm256_fmadd_ps(mInl, mkSig, mOutl);
+                mOuth = _mm256_fmadd_ps(mInh, mkSig, mOuth);
+
+                __m256i mOuti = floats_to_shorts_sat_perm_avx2(mOutl, mOuth);
+                _mm256_storeu_si256((__m256i*)(Output + PtrOut), mOuti);
+                PtrOut += 16;
+            }
+            NumSamples += PtrOut;
+
+#ifdef DEBUG_AWGN
+            std::copy(Output, Output + TxOutputBatchSize, OutAllI + PtrOutAll);
+            PtrOutAll += TxOutputBatchSize;
+            cout << "Collected " << PtrOutAll << endl;
+            if (PtrOutAll >= 1100000)
+            {
+                FILE* fid = fopen("AWGNOut.bin", "wb");
+                fwrite(OutAllI, sizeof(short), PtrOutAll, fid);
+                fclose(fid);
+                cout << "Saved AWGN " << PtrOutAll << endl;
+                std::this_thread::sleep_for(10ms);
+
+                Finish = true;
+            }
+#endif
+            OutputBuffer.AdvancePtrWr(TxOutputBatchSize);
         }
-        #endif
-        pTx->AdvanceOut();
-        pCvChnTx->notify_one();
         NoiseQ.AdvanceRead();
+        lkNoise.unlock();
         CvOutNoise.notify_one();
-        OutputBuffer.AdvancePtrWr(TxOutputBatchSize);
         CvOutUser.notify_one();
     }
+}
+
+bool AWGNChannel::CopyOutputSamples(short* dst, int nShorts, bool& stopAll)
+{
+    std::unique_lock<std::mutex> lk(mtxOutputBuffer_);
+    short* p = OutputBuffer.GetReadBuffer(nShorts);
+    while (p == nullptr && !stopAll)
+    {
+        CvOutUser.wait_for(lk, std::chrono::milliseconds(1));
+        p = OutputBuffer.GetReadBuffer(nShorts);
+    }
+    if (stopAll)
+        return false;
+    if (!p)
+        return false;
+    std::memcpy(dst, p, sizeof(short) * static_cast<size_t>(nShorts));
+    OutputBuffer.AdvancePtrRd(nShorts);
+    lk.unlock();
+    CvUserOut.notify_one();
+    return true;
 }
 
 
@@ -226,13 +229,4 @@ __m256i AWGNChannel::floats_to_shorts_sat_perm_avx2(__m256 x, __m256 y)
     v = _mm256_permute4x64_epi64(v, 0xD8);
 
     return v;
-}
-
- short * AWGNChannel::GetOutput(int Size)
- {
-    return OutputBuffer.GetReadBuffer(Size);
- }
-void AWGNChannel::AdvanceOut(int Size)
-{
-    OutputBuffer.AdvancePtrRd(Size);
 }

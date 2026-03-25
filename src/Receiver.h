@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <immintrin.h>
 #include <condition_variable>
+#include <mutex>
 #include <immintrin.h>
 #include "RxFilter.h"
 #include "BufferFloat.h"
@@ -15,11 +16,16 @@
 #include "SelfSyncScrambler_V35.h"
 #include "Prbs23.h"
 #include "SymbolRateEstimator.h"
+#include "GardnerTiming.h"
 #include <atomic>
 using namespace std;
 //#define DEBUG1
 //#define DEBUG2
 #define DEBUG_STATISTICS
+
+// Uncomment to bypass Gardner (TakeEven 2x->1 sps), dump Viterbi input symbols to ../data/viterbi_input_bypass.bin
+// (float32 interleaved I,Q per symbol), then compare offline with Gardner on-time dump via compare_viterbi_gardner_dump.m
+//#define BYPASS_GARDNER_DUMP_VITERBI_INPUT
 
 
 class Sampler;
@@ -65,6 +71,7 @@ private:
     double SymRateEstimatePeriodSec = 1.0;
     double SymRatePeakToMedianThreshold = 8.0;
     double SymRateMaxRelativeJump = 0.02;
+    GardnerTiming objGardnerTiming;
     Sampler *pSampler;
     BufferFloat oBufferFilter;
     Viterbi oViterbi[3] = {Viterbi(0),Viterbi(1),Viterbi(2)};
@@ -84,7 +91,9 @@ private:
     condition_variable CvFilterUser,CvRx2Out,CvOut2Rx;
     condition_variable CvVitManager2Vit;
     condition_variable CvViterbis2VitManager[3];
-    
+    std::mutex mtxFilterRing;
+    // Protects all SimpleQueue (DemodulatorQ, DecodedQ, OutputQ) + associated flags.
+    std::mutex mtxQueues;
 
     void Split3(float *InputI, float *InputQ, int Length, int PtrWr);
     void TakeEvenDebug(float *Input, float *Output, int Length);
@@ -92,6 +101,7 @@ private:
     SimpleQueue DecodedQ[3] = {SimpleQueue(LengthQueue),SimpleQueue(LengthQueue),SimpleQueue(LengthQueue)};
     SimpleQueue DemodulatorQ[3] = {SimpleQueue(LengthQueue),SimpleQueue(LengthQueue),SimpleQueue(LengthQueue)};
     SimpleQueue OutputQ;
+    // Protected by mtxQueues (all read/write must be done under lock).
     bool ViterbiSynchronized = false, PRBSSynchronized = false;
     ViterbiParameters ViterbiParams;
     unsigned char *ViterbiOutputs[3];
@@ -120,16 +130,21 @@ public:
     unsigned char *GetOutput()
     {
         unsigned char *RetVal = 0;
+        std::lock_guard<std::mutex> lk(mtxQueues);
         if(OutputQ.AvailableRead())
         {
-            int PtrRd = OutputQ.GetPtrRd();
+            int PtrRd = static_cast<int>(OutputQ.GetPtrRd());
             RetVal = OutputAll + PtrRd*BatchSize3;
         }
         return RetVal;
     }
     void AdvanceOutput(void)
     {
-        OutputQ.AdvanceRead();
+        {
+            std::lock_guard<std::mutex> lk(mtxQueues);
+            OutputQ.AdvanceRead();
+        }
+        CvOut2Rx.notify_one();
     }
     void Get_Condition_Variables(condition_variable * pcv_rx_out, condition_variable * pcv_out_rx)
     {

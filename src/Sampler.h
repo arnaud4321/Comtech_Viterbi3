@@ -2,6 +2,7 @@
 #include <chrono>
 #include <thread>
 #include <condition_variable>
+#include <mutex>
 #include "definitions.h"
 #include "random_generator_new.h"
 class AWGNChannel;
@@ -26,7 +27,8 @@ private:
     thread SamplingThread;
     AWGNChannel *pChannel;
     BufferShort oBuffer;
-    condition_variable  CvSamplerUser;
+    std::mutex mtxSamplerBuffer_;
+    condition_variable CvSamplerUser;
     void OperateSampler(void);
 public:
     uint64_t NumBatches;
@@ -38,16 +40,10 @@ public:
     {
         pChannel = p;
     }
-    short * GetOutput(int Size)
-    {
-        return oBuffer.GetReadBuffer(Size);
-    }
-
-    void AdvanceOut(int Size)
-    {
-        oBuffer.AdvancePtrRd(Size);
-    }
-    condition_variable * GetCvOut(void)
+    /// Lecture + AdvancePtrRd sous mutex (thread filtre vs thread sampler).
+    bool ReadFilterBatch(short* dst, int nShorts, bool& stopAll);
+    void NotifyFilterWaiters() { CvSamplerUser.notify_all(); }
+    condition_variable* GetCvOut(void)
     {
         return &CvSamplerUser;
     }

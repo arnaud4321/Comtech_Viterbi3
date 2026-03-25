@@ -3,6 +3,10 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <cassert>
+#include <sys/stat.h>
 
 extern std::mutex mtxfilethr;
 Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB),OutputQ(LengthQueue)
@@ -65,6 +69,7 @@ Receiver::~Receiver()
 void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
                             const SymbolRateEstimatorConfig& symRateCfg)
 {
+    StopAll = false;
     RxMode = RxModeIn;
     oBufferFilter.Reset();
     objRxFilter.CreateObjects(RollOff);
@@ -84,6 +89,7 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
     SymRateAcceptedCount = 0;
     SymbolRateDetected.store(false, std::memory_order_relaxed);
     SymbolRateEstimateHz.store(0.0, std::memory_order_relaxed);
+    objGardnerTiming.Reset(2.0, 0.0, 0.0, 64);
 
     FilterThread = std::thread(&Receiver::OperateFilter, this);
     ViterbiManagerThread = std::thread(&Receiver::OperateViterbiManager, this);
@@ -97,6 +103,8 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
 void Receiver::StopThreads(void)
 {
     StopAll = true;
+    if (pSampler)
+        pSampler->NotifyFilterWaiters();
     CvRx2Out.notify_all();
     CvOut2Rx.notify_all();
     CvVitManager2Vit.notify_all();
@@ -130,86 +138,107 @@ void Receiver::OperateFilter(void)
     mtxfilethr.unlock();
     #endif
 
-    condition_variable *pCvSamplerIn = pSampler->GetCvOut();
-    while(!StopAll)
+    alignas(32) short samplerChunk[2 * SPB];
+    while (!StopAll)
     {
-        short *SamplerOut = pSampler->GetOutput(SPB*2);
-        while((SamplerOut == 0) && (StopAll == false))
-        {
-            std::mutex mtx;
-            std::unique_lock<std::mutex> lck(mtx);
-            pCvSamplerIn->wait_for(lck,chrono::duration<double>(1e-3));
-            #ifdef DEBUG2
-                cout<<"WP A"<<endl;
-            #endif
-            SamplerOut = pSampler->GetOutput(SPB*2);
-        }
-        if(StopAll)
+        if (!pSampler->ReadFilterBatch(samplerChunk, 2 * SPB, StopAll))
             break;
         __m256 mouti;
         __m256 moutq;
         int PtrOut = 0;
-        for(int i = 0; i < (2*SPB); i+= 16)
+        for (int i = 0; i < (2 * SPB); i += 16)
         {
-            __m256i mIn = _mm256_loadu_si256((__m256i*) (SamplerOut+i));
+            __m256i mIn = _mm256_loadu_si256((__m256i*)(samplerChunk + i));
            shorts_to_floats_avx2(mIn,&mouti,&moutq);
            _mm256_store_ps(FilterInI+PtrOut,mouti);
            _mm256_store_ps(FilterInQ+PtrOut,moutq);
            PtrOut += 8;
         }
-        pSampler->AdvanceOut(2*SPB);
-        float *FilterOutI, *FilterOutQ;
-        oBufferFilter.GetWriteBuffer(FilterOutI,FilterOutQ,SPB);
-        objRxFilter.CreateOutputs(FilterInI,FilterInQ,FilterOutI,FilterOutQ,SPB);
         auto now_sym = std::chrono::steady_clock::now();
-        if (!symrate_collecting && now_sym >= next_symrate_start)
+
+        bool filterAdvancedRing = false;
+        bool symRateEstimateReady = false;
         {
-            symrate_collecting = true;
-            SymRateBatchCounter = 0;
-            next_symrate_start += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                std::chrono::duration<double>(SymRateEstimatePeriodSec));
-            while (next_symrate_start <= now_sym)
+            std::unique_lock<std::mutex> lk(mtxFilterRing);
+            if (SymbolRateDetected.load(std::memory_order_relaxed))
             {
+                CvFilterUser.wait(lk, [&] {
+                    return StopAll || !oBufferFilter.AlmostFull();
+                });
+            }
+            if (StopAll)
+                break;
+
+            float *FilterOutI, *FilterOutQ;
+            oBufferFilter.GetWriteBuffer(FilterOutI, FilterOutQ, SPB);
+            objRxFilter.CreateOutputs(FilterInI, FilterInQ, FilterOutI, FilterOutQ, SPB);
+
+            if (!symrate_collecting && now_sym >= next_symrate_start)
+            {
+                symrate_collecting = true;
+                SymRateBatchCounter = 0;
                 next_symrate_start += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(SymRateEstimatePeriodSec));
+                while (next_symrate_start <= now_sym)
+                {
+                    next_symrate_start += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(SymRateEstimatePeriodSec));
+                }
+            }
+
+            if (symrate_collecting)
+            {
+                symRateEstimateReady = objSymRateEstimator.PushBatch(FilterOutI, FilterOutQ, SPB);
+                SymRateBatchCounter++;
+            }
+
+            if (SymbolRateDetected.load(std::memory_order_relaxed))
+            {
+                assert(oBufferFilter.CanCommitWrite(SPB));
+                oBufferFilter.AdvancePtrWr(SPB);
+                filterAdvancedRing = true;
             }
         }
 
-        if (symrate_collecting)
+        if (symrate_collecting && symRateEstimateReady)
         {
-            const bool ready = objSymRateEstimator.PushBatch(FilterOutI, FilterOutQ, SPB);
-            SymRateBatchCounter++;
-            if (ready)
+            SymbolRateEstimateResult est = objSymRateEstimator.RunEstimation();
+            if (!SymbolRateDetected.load(std::memory_order_relaxed))
             {
-                SymbolRateEstimateResult est = objSymRateEstimator.RunEstimation();
-                if (!SymbolRateDetected.load(std::memory_order_relaxed))
+                if (est.Detected)
                 {
-                    if (est.Detected)
-                    {
-                        SymbolRateEstimateHz.store(est.SymbolRateHz, std::memory_order_relaxed);
-                        SymbolRateDetected.store(true, std::memory_order_relaxed);
-                        SymRateAcceptedCount = 1;
-                        std::cout << "Symbol rate detected: " << (est.SymbolRateHz / 1e6)
-                                  << " Msym/s (FFT res " << est.FftResolutionHz
-                                  << " Hz, peak/median " << est.PeakToMedian << ")" << std::endl;
-                    }
+                    SymbolRateEstimateHz.store(est.SymbolRateHz, std::memory_order_relaxed);
+                    SymbolRateDetected.store(true, std::memory_order_relaxed);
+                    SymRateAcceptedCount = 1;
+                    std::cout << "Symbol rate detected: " << (est.SymbolRateHz / 1e6)
+                              << " Msym/s (FFT res " << est.FftResolutionHz
+                              << " Hz, peak/median " << est.PeakToMedian << ")" << std::endl;
                 }
-                else if (est.Detected)
-                {
-                    const double prev = SymbolRateEstimateHz.load(std::memory_order_relaxed);
-                    const double rel = std::abs(est.SymbolRateHz - prev) / std::max(1.0, prev);
-                    if (est.PeakToMedian >= SymRatePeakToMedianThreshold && rel <= SymRateMaxRelativeJump)
-                    {
-                        const double alpha = 1.0 / static_cast<double>(std::max(2, SymRateAcceptedCount + 1));
-                        const double refined = (1.0 - alpha) * prev + alpha * est.SymbolRateHz;
-                        SymbolRateEstimateHz.store(refined, std::memory_order_relaxed);
-                        SymRateAcceptedCount++;
-                    }
-                }
-                symrate_collecting = false;
-                SymRateBatchCounter = 0;
             }
+            else if (est.Detected)
+            {
+                const double prev = SymbolRateEstimateHz.load(std::memory_order_relaxed);
+                const double rel = std::abs(est.SymbolRateHz - prev) / std::max(1.0, prev);
+                if (est.PeakToMedian >= SymRatePeakToMedianThreshold && rel <= SymRateMaxRelativeJump)
+                {
+                    const double alpha = 1.0 / static_cast<double>(std::max(2, SymRateAcceptedCount + 1));
+                    const double refined = (1.0 - alpha) * prev + alpha * est.SymbolRateHz;
+                    SymbolRateEstimateHz.store(refined, std::memory_order_relaxed);
+                    SymRateAcceptedCount++;
+                }
+            }
+            symrate_collecting = false;
+            SymRateBatchCounter = 0;
         }
+
+        if (!filterAdvancedRing && SymbolRateDetected.load(std::memory_order_relaxed))
+        {
+            std::unique_lock<std::mutex> lk(mtxFilterRing);
+            assert(oBufferFilter.CanCommitWrite(SPB));
+            oBufferFilter.AdvancePtrWr(SPB);
+            filterAdvancedRing = true;
+        }
+
         if (std::chrono::duration<double>(now_sym - symrate_display_start).count() >= 1.0)
         {
             if (SymbolRateDetected.load(std::memory_order_relaxed))
@@ -226,24 +255,25 @@ void Receiver::OperateFilter(void)
         }
 
         if (!SymbolRateDetected.load(std::memory_order_relaxed))
-            continue; // signal not detected yet: block subsequent processing
+            continue;
 
-        oBufferFilter.AdvancePtrWr(SPB);
-
-        samples_in_window += SPB;  // SPB complex samples processed this iteration
-
-        auto now_tp = std::chrono::steady_clock::now();
-        double dt = std::chrono::duration<double>(now_tp - throughput_window_start).count();
-        if (dt >= 1.0)
+        if (filterAdvancedRing)
         {
-            double msps = static_cast<double>(samples_in_window) / dt / 1e6;
-            std::cout << "RX Filter throughput: " << msps << " Msps" << std::endl;
-        
-            throughput_window_start = now_tp;
-            samples_in_window = 0;
-        }
+            samples_in_window += SPB;
 
-        CvFilterUser.notify_one();
+            auto now_tp = std::chrono::steady_clock::now();
+            double dt = std::chrono::duration<double>(now_tp - throughput_window_start).count();
+            if (dt >= 1.0)
+            {
+                double msps = static_cast<double>(samples_in_window) / dt / 1e6;
+                std::cout << "RX Filter throughput: " << msps << " Msps" << std::endl;
+
+                throughput_window_start = now_tp;
+                samples_in_window = 0;
+            }
+
+            CvFilterUser.notify_one();
+        }
     }
 }
 
@@ -278,54 +308,45 @@ void Receiver::OperateViterbi(void *p)
 
     while(!StopAll)
     {
-        int CtrB = 0;
-        while((!DemodulatorQ[IndexViterbi].AvailableRead()) && (StopAll == false))
-        {
-            #ifdef DEBUG2
-
-            if(CtrB > 0)
-                cout<<"WP B"<<endl;
-            #endif
-            std::mutex mtx;
-            std::unique_lock<std::mutex> lck(mtx);
-            CvVitManager2Vit.wait_for(lck,chrono::duration<double>(1e-3));
-            CtrB++;
-           
-        }
+        std::unique_lock<std::mutex> lk(mtxQueues);
+        CvVitManager2Vit.wait(lk, [&] {
+            return StopAll || DemodulatorQ[IndexViterbi].AvailableRead();
+        });
         if(StopAll)
             break;
         int PtrRd = DemodulatorQ[IndexViterbi].GetPtrRd()*BatchSize1;
         if(!ViterbiSynchronized)
         {
             oViterbi[IndexViterbi].reset_decoder();
-            oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, false, 1, 1, VitSyncResults[IndexViterbi].Metrics[0]);
+            float m[4] = {};
+            oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, false, 1, 1, m[0]);
             oViterbi[IndexViterbi].reset_decoder();
-            oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, false, 1, -1, VitSyncResults[IndexViterbi].Metrics[1]);
+            oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, false, 1, -1, m[1]);
             oViterbi[IndexViterbi].reset_decoder();
-            oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, true, -1, 1, VitSyncResults[IndexViterbi].Metrics[2]);
+            oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, true, -1, 1, m[2]);
             oViterbi[IndexViterbi].reset_decoder();
-            oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, true,   1, 1, VitSyncResults[IndexViterbi].Metrics[3]);
+            oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, true,   1, 1, m[3]);
+            for (int k = 0; k < 4; ++k)
+                VitSyncResults[IndexViterbi].Metrics[k] = m[k];
             VitSyncResults[IndexViterbi].Available = true;
             DemodulatorQ[IndexViterbi].AdvanceRead();
+            lk.unlock();
 
         }
         else
         {
             oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, ViterbiParams.ExchangeIQ, ViterbiParams.SignI, ViterbiParams.SignQ, VitSyncResults[IndexViterbi].Metrics[0]);
             
-            while((!DecodedQ[IndexViterbi].AvailableWrite()) && (StopAll == false))
-            {
-                std::mutex mtx;
-                std::unique_lock<std::mutex> lck(mtx);
-                std::this_thread::sleep_for((std::chrono::duration<double>(1e-4)));
-            }
-
-            int PtrWr = BatchSize1*DecodedQ[IndexViterbi].GetPtrRd();
-
+            CvViterbis2VitManager[IndexViterbi].wait(lk, [&] {
+                return StopAll || DecodedQ[IndexViterbi].AvailableWrite();
+            });
+            if (StopAll)
+                break;
+            int PtrWr = BatchSize1 * static_cast<int>(DecodedQ[IndexViterbi].GetPtrWr());
             DifferentialDecode(ViterbiOutputs[IndexViterbi],DiffDec[IndexViterbi]+PtrWr, BatchSize1, Last);
             DemodulatorQ[IndexViterbi].AdvanceRead();
-
             DecodedQ[IndexViterbi].AdvanceWrite();
+            lk.unlock();
         }
         CvViterbis2VitManager[IndexViterbi].notify_one();
 
@@ -336,7 +357,6 @@ void Receiver::OperateViterbiManager(void)
 {
     NumBitsAll = 0;
     NumErrorsAll = 0;
-    bool First = true;
     unsigned int PRBSSeed = 0;
     #ifdef WRITE_LOG_THR
 	mtxfilethr.lock();
@@ -351,6 +371,10 @@ void Receiver::OperateViterbiManager(void)
     CurrDebugStatistics.SumMetricsGrowth = 0;
     CurrDebugStatistics.NumBatches = 0;
     #endif
+    constexpr int kSymFrame = ReceiverInputBatchIQSymbols;
+    float pendingI[2 * kSymFrame];
+    float pendingQ[2 * kSymFrame];
+    int pendingCount = 0;
 
     while(!StopAll)
     {
@@ -365,25 +389,29 @@ void Receiver::OperateViterbiManager(void)
         //true -1 1
         //true 1 1
 
+        alignas(32) float filterChunkI[ReceiverInputBatchIQSamples];
+        alignas(32) float filterChunkQ[ReceiverInputBatchIQSamples];
         float *FilterOutI, *FilterOutQ;
-        oBufferFilter.GetReadBuffer(FilterOutI,FilterOutQ,ReceiverInputBatchIQSamples);
-        while((FilterOutI == 0) && (StopAll == false))
         {
-            std::mutex mtx;
-            std::unique_lock<std::mutex> lck(mtx);
-            CvFilterUser.wait_for(lck,chrono::duration<double>(1e-3));
-            oBufferFilter.GetReadBuffer(FilterOutI,FilterOutQ,BatchSize3*2);
-        #ifdef DEBUG2
-            if(FilterOutI == 0)
-                cout<<"WP C"<<endl;
+            std::unique_lock<std::mutex> lk(mtxFilterRing);
+            oBufferFilter.GetReadBuffer(FilterOutI, FilterOutQ, ReceiverInputBatchIQSamples);
+            while ((FilterOutI == 0) && (!StopAll))
+            {
+                CvFilterUser.wait_for(lk, chrono::duration<double>(1e-3));
+                oBufferFilter.GetReadBuffer(FilterOutI, FilterOutQ, ReceiverInputBatchIQSamples);
+            #ifdef DEBUG2
+                if (FilterOutI == 0)
+                    cout << "WP C" << endl;
             #endif
+            }
+            if (StopAll)
+                break;
+            std::memcpy(filterChunkI, FilterOutI, sizeof(float) * static_cast<size_t>(ReceiverInputBatchIQSamples));
+            std::memcpy(filterChunkQ, FilterOutQ, sizeof(float) * static_cast<size_t>(ReceiverInputBatchIQSamples));
         }
-
-        if(StopAll)
-            break;
         #ifdef DEBUG1
-        std::copy(FilterOutI,FilterOutI+BatchSize3*2,OutAllI+PtrOutAll);
-        std::copy(FilterOutQ,FilterOutQ+BatchSize3*2,OutAllQ+PtrOutAll);
+        std::copy(filterChunkI, filterChunkI + BatchSize3 * 2, OutAllI + PtrOutAll);
+        std::copy(filterChunkQ, filterChunkQ + BatchSize3 * 2, OutAllQ + PtrOutAll);
         PtrOutAll += BatchSize3*2;
 
         if(PtrOutAll >= NUM_SAMPLES_R1)
@@ -398,239 +426,246 @@ void Receiver::OperateViterbiManager(void)
         #endif
 
 
-        if(First)
-            First = false;
-        else
         {
-            TakeEvenDebug(FilterOutI, OneSpsI, ReceiverInputBatchIQSamples);
-            TakeEvenDebug(FilterOutQ, OneSpsQ, ReceiverInputBatchIQSamples);
-
-            for(int i = 0; i < 3; i++)
+#ifdef BYPASS_GARDNER_DUMP_VITERBI_INPUT
+            TakeEvenDebug(filterChunkI, OneSpsI, ReceiverInputBatchIQSamples);
+            TakeEvenDebug(filterChunkQ, OneSpsQ, ReceiverInputBatchIQSamples);
             {
-                int CtrD = 0;
-                while((!DemodulatorQ[i].AvailableWrite()) && (StopAll==false))
+                static FILE* gVitBypassDump = nullptr;
+                if (!gVitBypassDump)
                 {
-                
-                #ifdef DEBUG2
-
-                    CtrD++;
-                    if(CtrD  >0)
-                        cout<<" WP D "<<i<<endl;
-                #endif
-                    std::mutex mtx;
-                    std::unique_lock<std::mutex> lck(mtx);
-                    CvViterbis2VitManager[i].wait_for(lck,chrono::duration<double>(1e-3));
+                    mkdir("../data", 0755);
+                    gVitBypassDump = std::fopen("../data/viterbi_input_bypass.bin", "wb");
                 }
-                if(StopAll)
-                break;
+                if (gVitBypassDump)
+                {
+                    for (int i = 0; i < kSymFrame; ++i)
+                    {
+                        float iq[2] = {OneSpsI[i], OneSpsQ[i]};
+                        std::fwrite(iq, sizeof(float), 2, gVitBypassDump);
+                    }
+                    std::fflush(gVitBypassDump);
+                }
             }
-            if(StopAll)
-                break;
-            int PtrWr = DemodulatorQ[0].GetPtrWr();
-            Split3(OneSpsI, OneSpsQ, ReceiverInputBatchIQSymbols,PtrWr*BatchSize1);
-            if(StopAll)
-                break;
-            if(ViterbiSynchronized == false)
+            std::copy(OneSpsI, OneSpsI + kSymFrame, pendingI);
+            std::copy(OneSpsQ, OneSpsQ + kSymFrame, pendingQ);
+            pendingCount = kSymFrame;
+#else
+            const int nSym = objGardnerTiming.ProcessBlock(
+                filterChunkI, filterChunkQ, ReceiverInputBatchIQSamples,
+                OneSpsI, OneSpsQ, ReceiverInputBatchIQSymbols);
+            if (nSym > 0)
+            {
+                int copyCount = std::min(nSym, 2 * kSymFrame - pendingCount);
+                std::copy(OneSpsI, OneSpsI + copyCount, pendingI + pendingCount);
+                std::copy(OneSpsQ, OneSpsQ + copyCount, pendingQ + pendingCount);
+                pendingCount += copyCount;
+            }
+#endif
+
+            while ((pendingCount >= kSymFrame) && (!StopAll))
             {
                 for(int i = 0; i < 3; i++)
                 {
-                    VitSyncResults[i].Available = false;
+                    std::unique_lock<std::mutex> lk(mtxQueues);
+                    CvViterbis2VitManager[i].wait(lk, [&] {
+                        return StopAll || DemodulatorQ[i].AvailableWrite();
+                    });
+                    if(StopAll)
+                        break;
                 }
-            }
-            for(int i = 0; i < 3; i++)
-            {
-                DemodulatorQ[i].AdvanceWrite();
-            }
-            CvVitManager2Vit.notify_all();
+                if(StopAll)
+                    break;
+
+                // Option A: keep the mutex during access to the slot (SplitI/SplitQ) + AdvanceWrite.
+                std::unique_lock<std::mutex> lkSlots(mtxQueues);
+                int PtrWr = static_cast<int>(DemodulatorQ[0].GetPtrWr());
+                Split3(pendingI, pendingQ, kSymFrame, PtrWr*BatchSize1);
+                if(StopAll)
+                    break;
+                if(ViterbiSynchronized == false)
+                {
+                    for(int i = 0; i < 3; i++)
+                    {
+                        VitSyncResults[i].Available = false;
+                    }
+                }
+                for(int i = 0; i < 3; i++)
+                {
+                    DemodulatorQ[i].AdvanceWrite();
+                }
+                lkSlots.unlock();
+                CvVitManager2Vit.notify_all();
+
+                pendingCount -= kSymFrame;
+                if (pendingCount > 0)
+                {
+                    std::copy(pendingI + kSymFrame, pendingI + kSymFrame + pendingCount, pendingI);
+                    std::copy(pendingQ + kSymFrame, pendingQ + kSymFrame + pendingCount, pendingQ);
+                }
             
-            if(StopAll)
-                break;
-            if(!ViterbiSynchronized)
-            {
-                for(int i = 0; i < 3; i++)
+                if(StopAll)
+                    break;
+                if(!ViterbiSynchronized)
                 {
-                    int CtrE = 0;
-                    while((!VitSyncResults[i].Available) && (StopAll == false))
+                    for(int i = 0; i < 3; i++)
                     {
-                        #ifdef DEBUG2
-                        CtrE++;
-                        if(CtrE > 0)
-                            cout<<" WP E "<<i<<endl;
-                        #endif
-                        std::mutex mtx;
-                        std::unique_lock<std::mutex> lck(mtx);
-                        CvViterbis2VitManager[i].wait_for(lck,chrono::duration<double>(1e-3));
+                        std::unique_lock<std::mutex> lk(mtxQueues);
+                        CvViterbis2VitManager[i].wait(lk, [&] {
+                            return StopAll || VitSyncResults[i].Available;
+                        });
+                        if(StopAll)
+                            break;
                     }
                     if(StopAll)
                         break;
-                }
-                if(StopAll)
-                    break;
-                //Test if Synchronization
-                int BestIndex[3];
-                bool PassThresh[3];
-                __m128 mThresh = _mm_set1_ps(ViterbiThreshold1);
-                bool Success = true;
-                for(int i = 0; i < 3; i++)
-                {
-                    BestIndex[i] = 0;
-                    float BestMetrics = VitSyncResults[i].Metrics[0];
-                    for(int j = 1; j < 4; j++)
+                    //Test if Synchronization
+                    int BestIndex[3];
+                    bool PassThresh[3];
+                    __m128 mThresh = _mm_set1_ps(ViterbiThreshold1);
+                    bool Success = true;
+                    for(int i = 0; i < 3; i++)
                     {
-                        if(VitSyncResults[i].Metrics[j] < BestMetrics)
+                        BestIndex[i] = 0;
+                        float BestMetrics = VitSyncResults[i].Metrics[0];
+                        for(int j = 1; j < 4; j++)
                         {
-                            BestIndex[i] = j;
-                            BestMetrics = VitSyncResults[i].Metrics[j];
+                            if(VitSyncResults[i].Metrics[j] < BestMetrics)
+                            {
+                                BestIndex[i] = j;
+                                BestMetrics = VitSyncResults[i].Metrics[j];
+                            }
+                        }
+                        VitSyncResults[i].Metrics[BestIndex[i]] = 1e7;
+                        __m128 mResults = _mm_loadu_ps(VitSyncResults[i].Metrics);
+                        __m128 mBest = _mm_set1_ps(BestMetrics);
+                        mResults = _mm_sub_ps(mResults,mBest );
+                        __m128 mCmp = _mm_cmp_ps(mResults, mThresh, _CMP_GE_OS);
+                        int PassThresh =  _mm_movemask_ps(mCmp);
+                        if(PassThresh != 15)
+                        {
+                            Success = false;
+                            break;
                         }
                     }
-                    VitSyncResults[i].Metrics[BestIndex[i]] = 1e7;
-                    __m128 mResults = _mm_loadu_ps(VitSyncResults[i].Metrics);
-                    __m128 mBest = _mm_set1_ps(BestMetrics);
-                    mResults = _mm_sub_ps(mResults,mBest );
-                    __m128 mCmp = _mm_cmp_ps(mResults, mThresh, _CMP_GE_OS);
-                    int PassThresh =  _mm_movemask_ps(mCmp);
-                    if(PassThresh != 15)
-                    {
-                        Success = false;
-                        break;
-                    }
 
-                    
-                }
-
-                if(Success)
-                {
-                    if((BestIndex[0]== BestIndex[1]) && (BestIndex[0]== BestIndex[2]))
+                    if(Success)
                     {
-                        switch (BestIndex[0]) {
-                        case 0:
-                            ViterbiParams.ExchangeIQ = false;
-                            ViterbiParams.SignI = 1;
-                            ViterbiParams.SignQ = 1;
-                            break;
-                        case 1:
-                            ViterbiParams.ExchangeIQ = false;
-                            ViterbiParams.SignI = 1;
-                            ViterbiParams.SignQ = -1;
-                            break;
-                        case 2:
-                            ViterbiParams.ExchangeIQ = true;
-                            ViterbiParams.SignI = -1;
-                            ViterbiParams.SignQ = 1;
-                            break;
-                        case 3:
-                            ViterbiParams.ExchangeIQ = true;
-                            ViterbiParams.SignI = 1;
-                            ViterbiParams.SignQ = 1;
-                            break;   
+                        if((BestIndex[0]== BestIndex[1]) && (BestIndex[0]== BestIndex[2]))
+                        {
+                            switch (BestIndex[0]) {
+                            case 0:
+                                ViterbiParams.ExchangeIQ = false;
+                                ViterbiParams.SignI = 1;
+                                ViterbiParams.SignQ = 1;
+                                break;
+                            case 1:
+                                ViterbiParams.ExchangeIQ = false;
+                                ViterbiParams.SignI = 1;
+                                ViterbiParams.SignQ = -1;
+                                break;
+                            case 2:
+                                ViterbiParams.ExchangeIQ = true;
+                                ViterbiParams.SignI = -1;
+                                ViterbiParams.SignQ = 1;
+                                break;
+                            case 3:
+                                ViterbiParams.ExchangeIQ = true;
+                                ViterbiParams.SignI = 1;
+                                ViterbiParams.SignQ = 1;
+                                break;   
+                            }
+                            ViterbiSynchronized = true;
+                            for(int i = 0; i < 3; i++)
+                                oViterbi[i].reset_decoder();
                         }
-                        ViterbiSynchronized = true;
-                        for(int i = 0; i < 3; i++)
-                            oViterbi[i].reset_decoder();
                     }
                 }
-            }
-            else 
-            {
-                for(int i = 0; i < 3; i++)
+                else 
                 {
-                    int CtrE = 0;
-                    while((!DecodedQ[i].AvailableRead()) && (StopAll==false))
+                    for(int i = 0; i < 3; i++)
                     {
-                    #ifdef DEBUG2
+                        std::unique_lock<std::mutex> lk(mtxQueues);
+                        CvViterbis2VitManager[i].wait(lk, [&] {
+                            return StopAll || DecodedQ[i].AvailableRead();
+                        });
+                        if(StopAll)
+                            break;
+                    }
 
-                        CtrE++;
-                        if(CtrE > 0)
-                            cout<<" WP F "<<i<<endl;
+                    #ifdef DEBUG_STATISTICS
+                    for(int i = 0; i < 3; i++)
+                    {
+                        if(CurrDebugStatistics.MaxMetricsGrowth < VitSyncResults[i].Metrics[0])
+                            CurrDebugStatistics.MaxMetricsGrowth = VitSyncResults[i].Metrics[0];
+                        CurrDebugStatistics.SumMetricsGrowth += VitSyncResults[i].Metrics[0];
+                    }
+                    CurrDebugStatistics.NumBatches += 3;
+                    CurrDebugStatistics.MeanMetricsGrowth =  CurrDebugStatistics.SumMetricsGrowth/double(CurrDebugStatistics.NumBatches);
                     #endif
-                        std::mutex mtx;
-                        std::unique_lock<std::mutex> lck(mtx);
-                        CvViterbis2VitManager[i].wait_for(lck,chrono::duration<double>(1e-3));
-                    }
+
                     if(StopAll)
-                    break;
-                }
-
-                #ifdef DEBUG_STATISTICS
-                for(int i = 0; i < 3; i++)
-                {
-                    if(CurrDebugStatistics.MaxMetricsGrowth < VitSyncResults[i].Metrics[0])
-                        CurrDebugStatistics.MaxMetricsGrowth = VitSyncResults[i].Metrics[0];
-                    CurrDebugStatistics.SumMetricsGrowth += VitSyncResults[i].Metrics[0];
-                }
-                CurrDebugStatistics.NumBatches += 3;
-                CurrDebugStatistics.MeanMetricsGrowth =  CurrDebugStatistics.SumMetricsGrowth/double(CurrDebugStatistics.NumBatches);
-                #endif
-
-                if(StopAll)
-                    break;
-                int PtrRd = BatchSize1*DecodedQ[0].GetPtrRd();
-                int PtrOut = 0;
-                for(int i = 0; i < BatchSize1; i++)
-                {
-                    Merged[PtrOut++] = DiffDec[0][PtrRd+i];
-                    Merged[PtrOut++] = DiffDec[1][PtrRd+i];
-                    Merged[PtrOut++] = DiffDec[2][PtrRd+i];
-                }
-
-                for(int i = 0; i < 3; i++)
-                {
-                    DecodedQ[i].AdvanceRead();
-                }
-
-                 //Descramble
-                 int CtrE = 0;
-                while((!OutputQ.AvailableWrite()) && (StopAll==false))
-                {
-                #ifdef DEBUG2
-
-                    CtrE++;
-                    if(CtrE > 0)
-                        cout<<" WP G "<<endl;
-                #endif
-                    std::mutex mtx;
-                    std::unique_lock<std::mutex> lck(mtx);
-                    CvOut2Rx.wait_for(lck,chrono::duration<double>(1e-3));
-                }
-                if(StopAll)
-                    break;
-                PtrWr = BatchSize3*OutputQ.GetPtrWr();
-                objDescrambler.Descramble(Merged, OutputAll+PtrWr, BatchSize3);
-                OutputQ.AdvanceWrite();
-
-                if(RxMode == FILE_TX)
-                {
-                    CvRx2Out.notify_one();
-                }
-                else {
-                
-                    int PtrRd = PtrWr;
-                    if(!PRBSSynchronized)
+                        break;
+                    // Option A: keep the mutex during reading DiffDec[slot] + AdvanceRead.
+                    std::unique_lock<std::mutex> lkDec(mtxQueues);
+                    int PtrRd = BatchSize1*static_cast<int>(DecodedQ[0].GetPtrRd());
+                    int PtrOut = 0;
+                    for(int i = 0; i < BatchSize1; i++)
                     {
-                        int PtrStart;
-                        PRBSSynchronized = SyncPRBS(OutputAll+PtrRd, PtrStart, PRBSSeed);
-                        if(PRBSSynchronized)
-                        {
-                            oPrbs.CreateOutputs(PRBSSeed, BatchSize3 - PtrStart, PrbsOut);
-                            CountErrors(OutputAll+PtrRd+PtrStart, PrbsOut, BatchSize3-PtrStart);
-                        }
+                        Merged[PtrOut++] = DiffDec[0][PtrRd+i];
+                        Merged[PtrOut++] = DiffDec[1][PtrRd+i];
+                        Merged[PtrOut++] = DiffDec[2][PtrRd+i];
+                    }
+                    for(int i = 0; i < 3; i++)
+                        DecodedQ[i].AdvanceRead();
+                    lkDec.unlock();
+                    for(int i = 0; i < 3; i++)
+                        CvViterbis2VitManager[i].notify_one();
+
+                    //Descramble
+                    std::unique_lock<std::mutex> lkOut(mtxQueues);
+                    CvOut2Rx.wait(lkOut, [&] { return StopAll || OutputQ.AvailableWrite(); });
+                    if(StopAll)
+                        break;
+                    PtrWr = BatchSize3 * static_cast<int>(OutputQ.GetPtrWr());
+                    objDescrambler.Descramble(Merged, OutputAll+PtrWr, BatchSize3);
+                    OutputQ.AdvanceWrite();
+                    lkOut.unlock();
+
+                    if(RxMode == FILE_TX)
+                    {
+                        CvRx2Out.notify_one();
                     }
                     else {
-                        
+                        // Option A: keep mtxQueues for all access to the slot OutputAll[PtrWr..]
+                        std::unique_lock<std::mutex> lkOutRead(mtxQueues);
+                        int PtrRdOut = PtrWr;
+                        if(!PRBSSynchronized)
+                        {
+                            int PtrStart;
+                            PRBSSynchronized = SyncPRBS(OutputAll+PtrRdOut, PtrStart, PRBSSeed);
+                            if(PRBSSynchronized)
+                            {
+                                oPrbs.CreateOutputs(PRBSSeed, BatchSize3 - PtrStart, PrbsOut);
+                                CountErrors(OutputAll+PtrRdOut+PtrStart, PrbsOut, BatchSize3-PtrStart);
+                            }
+                        }
+                        else {
                             oPrbs.CreateOutputs(PRBSSeed, BatchSize3, PrbsOut);
-                            CountErrors(OutputAll+PtrRd, PrbsOut, BatchSize3);
-
+                            CountErrors(OutputAll+PtrRdOut, PrbsOut, BatchSize3);
+                        }
+                        OutputQ.AdvanceRead();
+                        lkOutRead.unlock();
+                        CvOut2Rx.notify_one();
                     }
-                    OutputQ.AdvanceRead();
                 }
-
             }
-
-                 
-
-      
         }
-        oBufferFilter.AdvancePtrRd(BatchSize3*2);
+        {
+            std::unique_lock<std::mutex> lk(mtxFilterRing);
+            oBufferFilter.AdvancePtrRd(ReceiverInputBatchIQSamples);
+        }
+        CvFilterUser.notify_one();
 
     }
 

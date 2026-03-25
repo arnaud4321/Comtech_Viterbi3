@@ -4,8 +4,10 @@ BufferFloat::BufferFloat(int BufferSizeIn, int ExtraBufferSize):BufferSize(Buffe
     int AllocLen = (BufferSize + ExtraBufferSize);
     datai = (float *)std::aligned_alloc(32,  2*AllocLen* sizeof(datai));
     dataq = datai + AllocLen;
-    Mask = BufferSize - 1;    
-    GuardSize = BufferSize - (BufferSize>>3);
+    Mask = BufferSize - 1;
+    // "Almost full" threshold: trigger backpressure when ~50% of the ring is occupied
+    // (previously: ~87.5%), to absorb a very slow Viterbi (e.g. DEBUG_GARDNER_OUTPUTS).
+    GuardSize = std::max(SPB * 16, BufferSize / 2);
 }
 
 BufferFloat::~BufferFloat()
@@ -22,7 +24,7 @@ void BufferFloat::GetWriteBuffer(float * &OutI, float * &OutQ, int Size) //if at
     OutQ = dataq + PtrWr;
 }
 
-int BufferFloat::GetSizeInBuffer(void)
+int BufferFloat::GetSizeInBuffer(void) const
 {
     int Delta = PtrWr - PtrRd;
     if(Delta < 0)
@@ -75,9 +77,8 @@ void BufferFloat::AdvancePtrWr(int Advance)
 
 void BufferFloat::AdvancePtrRd(int Advance)
 {
-    int NewPtrRd = PtrRd;
-    NewPtrRd += Advance;
-    if((NewPtrRd) >= BufferSize)
+    int NewPtrRd = PtrRd + Advance;
+    while (NewPtrRd >= BufferSize)
     {
         NewPtrRd -= BufferSize;
     }
@@ -94,4 +95,12 @@ bool BufferFloat::AlmostFull()
     {
         return false;
     }
+}
+
+bool BufferFloat::CanCommitWrite(int advance) const
+{
+    if (advance <= 0)
+        return true;
+    const int delta = GetSizeInBuffer();
+    return delta + advance <= BufferSize - 1;
 }

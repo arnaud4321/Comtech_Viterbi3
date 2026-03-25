@@ -54,16 +54,13 @@ int main(int argc, char* argv[])
 	condition_variable *pcv_rx_out, *pcv_out_rx;
 	if(objParams.TxMode == FILE_TX)
 	{
-		unsigned char *Out;
+		unsigned char *Out = nullptr;
 		
-		while((Out == oRx.GetOutput())== 0)
+		while((Out = oRx.GetOutput()) == nullptr)
 		{
-			std::mutex mtx;
-            std::unique_lock<std::mutex> lck(mtx);
-        	pcv_rx_out->wait(lck);
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
 		oRx.AdvanceOutput();
-		pcv_out_rx->notify_one();
 	}
 	else
 	{
@@ -86,8 +83,8 @@ int main(int argc, char* argv[])
 
 	oTx.StopThreads();
 	oAWGN.StopThreads();
-	objSampler.StopThread();
 	oRx.StopThreads();
+	objSampler.StopThread();
 	return 0;
 }
 

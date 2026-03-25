@@ -2,6 +2,7 @@
 #include "random_generator_new.h"
 class Transmitter;
 #include <thread>
+#include <mutex>
 #include <condition_variable>
 #include <immintrin.h>
 #include "SimpleQueue.h"
@@ -44,6 +45,8 @@ private:
     double AccelerationPeriod;
     double TotalPeriod, StablePeriod;
     unsigned int TransitionCounter[5];
+    std::mutex mtxOutputBuffer_;
+    std::mutex mtxNoiseQ_;
 public:
     AWGNChannel(unsigned int Seed);
     ~AWGNChannel();
@@ -57,14 +60,13 @@ public:
     {
         pParams = p;
     }
-    short * GetOutput(int Size);
-    void AdvanceOut(int Size);
     void GetCvs2User(condition_variable * &CvIn, condition_variable * &CvOut )
     {
         CvOut = &CvOutUser;
         CvIn = &CvUserOut;
     }
     BufferShort OutputBuffer;
-
+    /// Atomic copy (internal mutex) from OutputBuffer: same exclusion as GenerateOutput.
+    bool CopyOutputSamples(short* dst, int nShorts, bool& stopAll);
 };
 

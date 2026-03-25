@@ -64,12 +64,9 @@ void BufferShort::AdvancePtrWr(int Advance)
 
 void BufferShort::AdvancePtrRd(int Advance)
 {
-    int NewPtrRd = PtrRd;
-    NewPtrRd += Advance;
-    if((NewPtrRd) >= BufferSize)
-    {
+    int NewPtrRd = PtrRd + Advance;
+    while (NewPtrRd >= BufferSize)
         NewPtrRd -= BufferSize;
-    }
     PtrRd = NewPtrRd;
 }
 

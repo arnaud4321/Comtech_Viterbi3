@@ -1,10 +1,12 @@
 #pragma once
 #include "cstdlib"
-#include <algorithm>    // std::copy
+#include <algorithm>    // std::copy, std::max
 #include "definitions.h"
 #include <iostream>
 using namespace std;
-//Everything is managed in floats
+// I/Q ring (floats). Multithread contract: all reads/writes of PtrRd/PtrWr must be
+// serialized by the caller (e.g. mtxFilterRing). GetWriteBuffer does not check capacity:
+// the producer must wait for AlmostFull() == false before CreateOutputs + AdvancePtrWr(advance).
 class BufferFloat
 {
 private:
@@ -52,6 +54,9 @@ public:
         return BufferSize;
     }
     bool AlmostFull(void);
-    int GetSizeInBuffer(void);
+    int GetSizeInBuffer(void) const;
+    // After the physical write [PtrWr, PtrWr+advance), verify that an AdvancePtrWr(advance)
+    // would not push the fill level beyond BufferSize-1 (ring without wasted slot).
+    bool CanCommitWrite(int advance) const;
 };
 
