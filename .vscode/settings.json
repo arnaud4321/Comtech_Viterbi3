@@ -1,0 +1,7 @@
+{
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build",
+    "--query-driver=/opt/intel/oneapi/compiler/latest/bin/icpx,/usr/bin/g++,/usr/bin/gcc"
+  ],
+  "C_Cpp.intelliSenseEngine": "disabled"
+}

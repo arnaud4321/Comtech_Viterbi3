@@ -5,8 +5,8 @@
 #include <cstdio>
 #include <sys/stat.h>
 #include <vector>
-#include <cstdint>
 #ifdef DEBUG_GARDNER_DEBIT
+#include <cstdint>
 #include <iostream>
 #endif
 
@@ -42,12 +42,8 @@ void GardnerTiming::Reset(double omegaNom, double kp, double ki, int updatePerio
     kp_ = kp;
     ki_ = ki;
     integ_ = 0.0;
-    mu_ = 0.0;
     updatePeriod_ = std::max(1, updatePeriod);
     updateCounter_ = 0;
-    hasPrevSym_ = false;
-    prevSymI_ = 0.0f;
-    prevSymQ_ = 0.0f;
     tCursor_ = 0.0; // grid 0,2,4,... aligned with TakeEven (2x -> 1x)
     hasOverlap_ = false;
     for (int i = 0; i < kOverlap; ++i)
@@ -97,9 +93,13 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
     std::vector<float> dbgEarly;
     std::vector<float> dbgOnTime;
     std::vector<float> dbgLate;
+    std::vector<float> dbgErr;
+    std::vector<float> dbgOmega;
     dbgEarly.reserve(static_cast<size_t>(outMax) * 2u);
     dbgOnTime.reserve(static_cast<size_t>(outMax) * 2u);
     dbgLate.reserve(static_cast<size_t>(outMax) * 2u);
+    dbgErr.reserve(static_cast<size_t>(outMax));
+    dbgOmega.reserve(static_cast<size_t>(outMax));
 #endif
 
     while (outCount < outMax)
@@ -128,14 +128,14 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
         dbgLate.push_back(lQ);
 #endif
 
-        // Gardner TED on complex signal.
-        float err = 0.0f;
-        if (hasPrevSym_)
-            err = (lI - eI) * prevSymI_ + (lQ - eQ) * prevSymQ_;
+        // Gardner TED on complex signal (use current on-time symbol).
+        const float err = (lI - eI) * yI + (lQ - eQ) * yQ;
+//        const float err = (eI - lI) * yI + (eQ - lQ) * yQ;
 
-        prevSymI_ = yI;
-        prevSymQ_ = yQ;
-        hasPrevSym_ = true;
+#ifdef DEBUG_GARDNER_OUTPUTS
+        dbgErr.push_back(err);
+        dbgOmega.push_back(static_cast<float>(omega_));
+#endif
 
         updateCounter_++;
         if (updateCounter_ >= updatePeriod_)
@@ -151,22 +151,20 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
     }
 
 #ifdef DEBUG_GARDNER_OUTPUTS
-    if (fidEarly_ && fidOnTime_ && fidLate_ && !dbgEarly.empty())
+    if (fidEarly_ && fidOnTime_ && fidLate_ && fidErr_ && fidOmega_ && !dbgEarly.empty())
     {
         const size_t nfloat = dbgEarly.size();
         std::fwrite(dbgEarly.data(), sizeof(float), nfloat, static_cast<FILE*>(fidEarly_));
         std::fwrite(dbgOnTime.data(), sizeof(float), nfloat, static_cast<FILE*>(fidOnTime_));
         std::fwrite(dbgLate.data(), sizeof(float), nfloat, static_cast<FILE*>(fidLate_));
+        std::fwrite(dbgErr.data(), sizeof(float), static_cast<size_t>(outCount), static_cast<FILE*>(fidErr_));
+        std::fwrite(dbgOmega.data(), sizeof(float), static_cast<size_t>(outCount), static_cast<FILE*>(fidOmega_));
     }
 #endif
 
     // Carry continuous timing cursor to next block (in "new block" coordinates).
     const double tLoopEnd = t;
     tCursor_ = tLoopEnd - static_cast<double>(workLen);
-    const bool clampedLow = (tCursor_ < -2.0);
-    const bool clampedHigh = (tCursor_ > static_cast<double>(kOverlap));
-    const bool cursorClamped = clampedLow || clampedHigh;
-    mu_ = tCursor_ - std::floor(tCursor_);
     if (tCursor_ < -2.0)
         tCursor_ = -2.0;
     if (tCursor_ > static_cast<double>(kOverlap))
@@ -181,6 +179,7 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
     hasOverlap_ = true;
 
 #ifdef DEBUG_GARDNER_DEBIT
+    const bool cursorClamped = (tCursor_ <= -2.0) || (tCursor_ >= static_cast<double>(kOverlap));
     gGardnerDebit.blocks++;
     gGardnerDebit.sumIn += static_cast<std::uint64_t>(inLen);
     gGardnerDebit.sumOut += static_cast<std::uint64_t>(outCount);
@@ -208,7 +207,7 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
 #ifdef DEBUG_GARDNER_OUTPUTS
 void GardnerTiming::OpenDebugFilesIfNeeded()
 {
-    if (fidEarly_ && fidOnTime_ && fidLate_)
+    if (fidEarly_ && fidOnTime_ && fidLate_ && fidErr_ && fidOmega_)
         return;
     mkdir("../data", 0755);
     if (!fidEarly_)
@@ -217,6 +216,10 @@ void GardnerTiming::OpenDebugFilesIfNeeded()
         fidOnTime_ = std::fopen("../data/gardner_ontime.bin", "wb");
     if (!fidLate_)
         fidLate_ = std::fopen("../data/gardner_late.bin", "wb");
+    if (!fidErr_)
+        fidErr_ = std::fopen("../data/gardner_err.bin", "wb");
+    if (!fidOmega_)
+        fidOmega_ = std::fopen("../data/gardner_omega.bin", "wb");
 }
 
 void GardnerTiming::CloseDebugFiles()
@@ -235,6 +238,16 @@ void GardnerTiming::CloseDebugFiles()
     {
         std::fclose(static_cast<FILE*>(fidLate_));
         fidLate_ = nullptr;
+    }
+    if (fidErr_)
+    {
+        std::fclose(static_cast<FILE*>(fidErr_));
+        fidErr_ = nullptr;
+    }
+    if (fidOmega_)
+    {
+        std::fclose(static_cast<FILE*>(fidOmega_));
+        fidOmega_ = nullptr;
     }
 }
 #endif

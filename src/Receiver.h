@@ -27,6 +27,10 @@ using namespace std;
 // (float32 interleaved I,Q per symbol), then compare offline with Gardner on-time dump via compare_viterbi_gardner_dump.m
 //#define BYPASS_GARDNER_DUMP_VITERBI_INPUT
 
+// Insert a fixed sampling-clock offset (SCO) at Gardner input (2 sps stream).
+// This simulates a constant rhythm error without using the Resampler module.
+#define DEBUG_GARDNER_INPUT_SCO
+#define DEBUG_GARDNER_INPUT_SCO_PPM 1000.0
 
 class Sampler;
 struct DebugStatistics

@@ -9,6 +9,35 @@
 #include <sys/stat.h>
 
 extern std::mutex mtxfilethr;
+
+#ifdef DEBUG_GARDNER_INPUT_SCO
+namespace
+{
+inline int ClampIndexSco(int idx, int lo, int hi)
+{
+    return std::max(lo, std::min(hi, idx));
+}
+
+inline float InterpLagrange4Sco(const float* x, int len, double t)
+{
+    int k = static_cast<int>(std::floor(t));
+    k = ClampIndexSco(k, 1, len - 3);
+    const double mu = t - static_cast<double>(k);
+    const float x0 = x[k - 1];
+    const float x1 = x[k + 0];
+    const float x2 = x[k + 1];
+    const float x3 = x[k + 2];
+
+    const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
+    const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
+    const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
+    const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
+
+    return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3);
+}
+} // namespace
+#endif
+
 Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB),OutputQ(LengthQueue)
 {
     FilterInI = (float*) _mm_malloc(SPB*2*sizeof(float),32);
@@ -89,7 +118,7 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
     SymRateAcceptedCount = 0;
     SymbolRateDetected.store(false, std::memory_order_relaxed);
     SymbolRateEstimateHz.store(0.0, std::memory_order_relaxed);
-    objGardnerTiming.Reset(2.0, 0.0, 0.0, 64);
+    objGardnerTiming.Reset(2.0, 0.0e-4, 1.0e-6, 64);
 
     FilterThread = std::thread(&Receiver::OperateFilter, this);
     ViterbiManagerThread = std::thread(&Receiver::OperateViterbiManager, this);
@@ -451,8 +480,73 @@ void Receiver::OperateViterbiManager(void)
             std::copy(OneSpsQ, OneSpsQ + kSymFrame, pendingQ);
             pendingCount = kSymFrame;
 #else
+#ifdef DEBUG_GARDNER_INPUT_SCO
+#ifndef DEBUG_GARDNER_INPUT_SCO_PPM
+#define DEBUG_GARDNER_INPUT_SCO_PPM 50.0
+#endif
+            // Debug: inject a fixed sampling-clock offset (SCO) at Gardner input (2 sps stream).
+            // This simulates a constant rhythm error without using the Resampler module.
+            alignas(32) float scoChunkI[ReceiverInputBatchIQSamples];
+            alignas(32) float scoChunkQ[ReceiverInputBatchIQSamples];
+            {
+                constexpr int kScoOverlap = 4;
+                static bool hasOverlap = false;
+                static float overlapI[kScoOverlap] = {0, 0, 0, 0};
+                static float overlapQ[kScoOverlap] = {0, 0, 0, 0};
+                static double tSco = 0.0; // time cursor in "current block" coordinates.
+
+                // Build a continuous input by prepending overlap from previous block.
+                const int prefix = hasOverlap ? kScoOverlap : 0;
+                const int workLen = prefix + ReceiverInputBatchIQSamples;
+                alignas(32) float workI[kScoOverlap + ReceiverInputBatchIQSamples];
+                alignas(32) float workQ[kScoOverlap + ReceiverInputBatchIQSamples];
+                for (int i = 0; i < prefix; ++i)
+                {
+                    workI[i] = overlapI[i];
+                    workQ[i] = overlapQ[i];
+                }
+                std::memcpy(workI + prefix, filterChunkI, sizeof(float) * static_cast<size_t>(ReceiverInputBatchIQSamples));
+                std::memcpy(workQ + prefix, filterChunkQ, sizeof(float) * static_cast<size_t>(ReceiverInputBatchIQSamples));
+
+                // +ppm means "receiver sampling clock is faster": Fs' = Fs*(1+eps).
+                // When sampling a discrete-time signal on the nominal grid, this corresponds
+                // to evaluating x(t) with step = 1/(1+eps) (< 1 if eps > 0).
+                const double eps = (static_cast<double>(DEBUG_GARDNER_INPUT_SCO_PPM) * 1.0e-6);
+                const double step = 1.0 / (1.0 + eps);
+
+                // Ensure tSco stays in a safe range so that tSco+prefix is well within the stencil.
+                if (tSco < 0.0)
+                    tSco = 0.0;
+                if (tSco > static_cast<double>(ReceiverInputBatchIQSamples))
+                    tSco = static_cast<double>(ReceiverInputBatchIQSamples);
+
+                for (int n = 0; n < ReceiverInputBatchIQSamples; ++n)
+                {
+                    const double t = tSco + static_cast<double>(prefix);
+                    scoChunkI[n] = InterpLagrange4Sco(workI, workLen, t);
+                    scoChunkQ[n] = InterpLagrange4Sco(workQ, workLen, t);
+                    tSco += step;
+                }
+
+                // Carry timing cursor to next block (in "new block" coordinates).
+                tSco -= static_cast<double>(ReceiverInputBatchIQSamples);
+
+                // Update overlap with last kScoOverlap input samples for next call.
+                for (int i = 0; i < kScoOverlap; ++i)
+                {
+                    overlapI[i] = filterChunkI[ReceiverInputBatchIQSamples - kScoOverlap + i];
+                    overlapQ[i] = filterChunkQ[ReceiverInputBatchIQSamples - kScoOverlap + i];
+                }
+                hasOverlap = true;
+            }
+            const float* gInI = scoChunkI;
+            const float* gInQ = scoChunkQ;
+#else
+            const float* gInI = filterChunkI;
+            const float* gInQ = filterChunkQ;
+#endif
             const int nSym = objGardnerTiming.ProcessBlock(
-                filterChunkI, filterChunkQ, ReceiverInputBatchIQSamples,
+                gInI, gInQ, ReceiverInputBatchIQSamples,
                 OneSpsI, OneSpsQ, ReceiverInputBatchIQSymbols);
             if (nSym > 0)
             {

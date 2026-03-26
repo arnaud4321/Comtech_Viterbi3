@@ -20,15 +20,10 @@ private:
     double omegaNom_ = 2.0;
     double omega_ = 2.0;
     double kp_ = 1e-3;
-    double ki_ = 1e-5;
+    double ki_ = 1e-6;
     double integ_ = 0.0;
-    double mu_ = 0.0;
     int updatePeriod_ = 64;
     int updateCounter_ = 0;
-
-    bool hasPrevSym_ = false;
-    float prevSymI_ = 0.0f;
-    float prevSymQ_ = 0.0f;
     double tCursor_ = 0.0; // consistent with Reset() and TakeEven grid (0,2,4,…)
     static constexpr int kOverlap = 4;
     float overlapI_[kOverlap] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -41,6 +36,8 @@ private:
     void* fidEarly_ = nullptr;
     void* fidOnTime_ = nullptr;
     void* fidLate_ = nullptr;
+    void* fidErr_ = nullptr;
+    void* fidOmega_ = nullptr;
 #endif
 };
 
