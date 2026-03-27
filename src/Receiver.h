@@ -30,7 +30,7 @@ using namespace std;
 // Insert a fixed sampling-clock offset (SCO) at Gardner input (2 sps stream).
 // This simulates a constant rhythm error without using the Resampler module.
 #define DEBUG_GARDNER_INPUT_SCO
-#define DEBUG_GARDNER_INPUT_SCO_PPM 1000.0
+#define DEBUG_GARDNER_INPUT_SCO_PPM 20.0
 
 class Sampler;
 struct DebugStatistics

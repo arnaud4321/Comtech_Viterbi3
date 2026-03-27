@@ -18,6 +18,73 @@ inline int ClampIndexSco(int idx, int lo, int hi)
     return std::max(lo, std::min(hi, idx));
 }
 
+struct ScoRingBuffer
+{
+    static constexpr int kSize = 1 << 19; // power of 2
+    static constexpr int kMask = kSize - 1;
+
+    alignas(32) float ringI[kSize] = {};
+    alignas(32) float ringQ[kSize] = {};
+    long long absWrite = 0; // absolute sample index of next write
+
+    void PushBlock(const float* inI, const float* inQ, int n)
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const long long a = absWrite + static_cast<long long>(i);
+            ringI[static_cast<int>(a) & kMask] = inI[i];
+            ringQ[static_cast<int>(a) & kMask] = inQ[i];
+        }
+        absWrite += static_cast<long long>(n);
+    }
+
+    long long OldestAbs() const { return absWrite - static_cast<long long>(kSize); }
+    long long NewestAbs() const { return absWrite - 1; }
+
+    float GetI(long long absIdx) const { return ringI[static_cast<int>(absIdx) & kMask]; }
+    float GetQ(long long absIdx) const { return ringQ[static_cast<int>(absIdx) & kMask]; }
+
+    bool CanInterp(double t) const
+    {
+        const long long k = static_cast<long long>(std::floor(t));
+        return (k - 1 >= OldestAbs()) && (k + 2 < absWrite);
+    }
+
+    float InterpLagrange4I(double t) const
+    {
+        const long long k = static_cast<long long>(std::floor(t));
+        const double mu = t - static_cast<double>(k);
+        const float x0 = GetI(k - 1);
+        const float x1 = GetI(k + 0);
+        const float x2 = GetI(k + 1);
+        const float x3 = GetI(k + 2);
+
+        const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
+        const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
+        const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
+        const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
+
+        return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3);
+    }
+
+    float InterpLagrange4Q(double t) const
+    {
+        const long long k = static_cast<long long>(std::floor(t));
+        const double mu = t - static_cast<double>(k);
+        const float x0 = GetQ(k - 1);
+        const float x1 = GetQ(k + 0);
+        const float x2 = GetQ(k + 1);
+        const float x3 = GetQ(k + 2);
+
+        const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
+        const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
+        const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
+        const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
+
+        return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3);
+    }
+};
+
 inline float InterpLagrange4Sco(const float* x, int len, double t)
 {
     int k = static_cast<int>(std::floor(t));
@@ -118,7 +185,8 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
     SymRateAcceptedCount = 0;
     SymbolRateDetected.store(false, std::memory_order_relaxed);
     SymbolRateEstimateHz.store(0.0, std::memory_order_relaxed);
-    objGardnerTiming.Reset(2.0, 0.0e-4, 1.0e-6, 64);
+  //  objGardnerTiming.Reset(2.0, 1.0e-1, 1.0e-3, 1);
+    objGardnerTiming.Reset(2.0, 1.0e-5, 1.0e-7, 64);
 
     FilterThread = std::thread(&Receiver::OperateFilter, this);
     ViterbiManagerThread = std::thread(&Receiver::OperateViterbiManager, this);
@@ -486,68 +554,119 @@ void Receiver::OperateViterbiManager(void)
 #endif
             // Debug: inject a fixed sampling-clock offset (SCO) at Gardner input (2 sps stream).
             // This simulates a constant rhythm error without using the Resampler module.
-            alignas(32) float scoChunkI[ReceiverInputBatchIQSamples];
-            alignas(32) float scoChunkQ[ReceiverInputBatchIQSamples];
+            constexpr int kScoOutMax = ReceiverInputBatchIQSamples + 512;
+            alignas(32) float scoChunkI[kScoOutMax];
+            alignas(32) float scoChunkQ[kScoOutMax];
+            int scoOutLen = 0;
             {
-                constexpr int kScoOverlap = 4;
-                static bool hasOverlap = false;
-                static float overlapI[kScoOverlap] = {0, 0, 0, 0};
-                static float overlapQ[kScoOverlap] = {0, 0, 0, 0};
-                static double tSco = 0.0; // time cursor in "current block" coordinates.
+                static ScoRingBuffer scoRing;
+                static bool scoInit = false;
+                static double tScoAbs = 0.0; // absolute time cursor (input-sample units)
 
-                // Build a continuous input by prepending overlap from previous block.
-                const int prefix = hasOverlap ? kScoOverlap : 0;
-                const int workLen = prefix + ReceiverInputBatchIQSamples;
-                alignas(32) float workI[kScoOverlap + ReceiverInputBatchIQSamples];
-                alignas(32) float workQ[kScoOverlap + ReceiverInputBatchIQSamples];
-                for (int i = 0; i < prefix; ++i)
-                {
-                    workI[i] = overlapI[i];
-                    workQ[i] = overlapQ[i];
-                }
-                std::memcpy(workI + prefix, filterChunkI, sizeof(float) * static_cast<size_t>(ReceiverInputBatchIQSamples));
-                std::memcpy(workQ + prefix, filterChunkQ, sizeof(float) * static_cast<size_t>(ReceiverInputBatchIQSamples));
+                // Push the current block into the ring.
+                scoRing.PushBlock(filterChunkI, filterChunkQ, ReceiverInputBatchIQSamples);
 
                 // +ppm means "receiver sampling clock is faster": Fs' = Fs*(1+eps).
-                // When sampling a discrete-time signal on the nominal grid, this corresponds
-                // to evaluating x(t) with step = 1/(1+eps) (< 1 if eps > 0).
+                // Evaluate x(t) with step = 1/(1+eps).
                 const double eps = (static_cast<double>(DEBUG_GARDNER_INPUT_SCO_PPM) * 1.0e-6);
                 const double step = 1.0 / (1.0 + eps);
 
-                // Ensure tSco stays in a safe range so that tSco+prefix is well within the stencil.
-                if (tSco < 0.0)
-                    tSco = 0.0;
-                if (tSco > static_cast<double>(ReceiverInputBatchIQSamples))
-                    tSco = static_cast<double>(ReceiverInputBatchIQSamples);
-
-                for (int n = 0; n < ReceiverInputBatchIQSamples; ++n)
+                // Maintain a fixed lookahead margin by staying behind newest data.
+                // This prevents ever hitting interpolation bounds for ppm>0 and ppm<0.
+                const long long latencySamples = static_cast<long long>(ReceiverInputBatchIQSamples) * 64LL;
+                assert(latencySamples + 16 < ScoRingBuffer::kSize);
+                if (!scoInit)
                 {
-                    const double t = tSco + static_cast<double>(prefix);
-                    scoChunkI[n] = InterpLagrange4Sco(workI, workLen, t);
-                    scoChunkQ[n] = InterpLagrange4Sco(workQ, workLen, t);
-                    tSco += step;
+                    if (scoRing.absWrite > latencySamples + 4)
+                    {
+                        tScoAbs = static_cast<double>(scoRing.absWrite - latencySamples);
+                        scoInit = true;
+                    }
+                    else
+                    {
+                        scoOutLen = 0;
+                    }
                 }
-
-                // Carry timing cursor to next block (in "new block" coordinates).
-                tSco -= static_cast<double>(ReceiverInputBatchIQSamples);
-
-                // Update overlap with last kScoOverlap input samples for next call.
-                for (int i = 0; i < kScoOverlap; ++i)
+                if (scoInit)
                 {
-                    overlapI[i] = filterChunkI[ReceiverInputBatchIQSamples - kScoOverlap + i];
-                    overlapQ[i] = filterChunkQ[ReceiverInputBatchIQSamples - kScoOverlap + i];
+                    const double newestSafe = static_cast<double>(scoRing.absWrite - 4);
+                    const double oldestSafe = static_cast<double>(scoRing.OldestAbs() + 2);
+
+                    // Strict no-clamp: if out of valid region, re-arm initialization and output 0.
+                    if ((tScoAbs < oldestSafe) || (tScoAbs > newestSafe))
+                    {
+                        scoInit = false;
+                        scoOutLen = 0;
+                    }
+                    else
+                    {
+                        // Choose variable SCO output length so ring occupancy stays around target latency.
+                        const double targetLag = static_cast<double>(latencySamples);
+                        const double desiredTAfter = static_cast<double>(scoRing.absWrite) - targetLag;
+                        const double nOutReal = (desiredTAfter - tScoAbs) / step;
+                        int nOut = static_cast<int>(std::llround(nOutReal));
+                        if (nOut < 0)
+                            nOut = 0;
+
+                        // Hard safety limit from newest available sample.
+                        int nOutByNewest = static_cast<int>(std::floor((newestSafe - tScoAbs) / step)) + 1;
+                        if (nOutByNewest < 0)
+                            nOutByNewest = 0;
+                        nOut = std::min(nOut, nOutByNewest);
+                        nOut = std::min(nOut, kScoOutMax);
+                        scoOutLen = nOut;
+
+                        for (int n = 0; n < scoOutLen; ++n)
+                        {
+                            const double t = tScoAbs;
+                            scoChunkI[n] = scoRing.InterpLagrange4I(t);
+                            scoChunkQ[n] = scoRing.InterpLagrange4Q(t);
+                            tScoAbs += step;
+                        }
+                    }
                 }
-                hasOverlap = true;
             }
             const float* gInI = scoChunkI;
             const float* gInQ = scoChunkQ;
+            const int gInLen = scoOutLen;
 #else
             const float* gInI = filterChunkI;
             const float* gInQ = filterChunkQ;
+            const int gInLen = ReceiverInputBatchIQSamples;
 #endif
-            const int nSym = objGardnerTiming.ProcessBlock(
-                gInI, gInQ, ReceiverInputBatchIQSamples,
-                OneSpsI, OneSpsQ, ReceiverInputBatchIQSymbols);
+#ifdef DEBUG_GARDNER_OUTPUTS
+            if (gInLen > 0)
+            {
+                static FILE* gGardnerInputDump = nullptr;
+                if (!gGardnerInputDump)
+                {
+                    mkdir("../data", 0755);
+                    gGardnerInputDump = std::fopen("../data/gardner_input_iq.bin", "wb");
+                }
+                if (gGardnerInputDump)
+                {
+                    for (int i = 0; i < gInLen; ++i)
+                    {
+                        float iq[2] = {gInI[i], gInQ[i]};
+                        std::fwrite(iq, sizeof(float), 2, gGardnerInputDump);
+                    }
+                    std::fflush(gGardnerInputDump);
+                }
+            }
+#endif
+            int nSym = 0;
+            if (gInLen > 0)
+            {
+                nSym = objGardnerTiming.ProcessBlock(
+                    gInI, gInQ, gInLen,
+                    OneSpsI, OneSpsQ, 2 * ReceiverInputBatchIQSymbols);
+            }
+            // Gate symbols to Viterbi until Gardner is locked.
+            if (!objGardnerTiming.IsLocked())
+            {
+                pendingCount = 0;
+                nSym = 0;
+            }
             if (nSym > 0)
             {
                 int copyCount = std::min(nSym, 2 * kSymFrame - pendingCount);
@@ -570,6 +689,26 @@ void Receiver::OperateViterbiManager(void)
                 }
                 if(StopAll)
                     break;
+
+#ifdef DEBUG_GARDNER_OUTPUTS
+                {
+                    static FILE* gVitFromGardnerDump = nullptr;
+                    if (!gVitFromGardnerDump)
+                    {
+                        mkdir("../data", 0755);
+                        gVitFromGardnerDump = std::fopen("../data/viterbi_input_from_gardner.bin", "wb");
+                    }
+                    if (gVitFromGardnerDump)
+                    {
+                        for (int i = 0; i < kSymFrame; ++i)
+                        {
+                            float iq[2] = {pendingI[i], pendingQ[i]};
+                            std::fwrite(iq, sizeof(float), 2, gVitFromGardnerDump);
+                        }
+                        std::fflush(gVitFromGardnerDump);
+                    }
+                }
+#endif
 
                 // Option A: keep the mutex during access to the slot (SplitI/SplitQ) + AdvanceWrite.
                 std::unique_lock<std::mutex> lkSlots(mtxQueues);
