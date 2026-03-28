@@ -47,7 +47,7 @@ private:
     // Target: keep ~kOmegaLockMeasures omega points spanning ~kOmegaLockWindowSeconds.
     static constexpr double kOmegaLockWindowSeconds = 0.1;
     static constexpr int kOmegaLockMeasures = 100;
-    static constexpr double kOmegaLockSpanThreshold = 5.0e-6; // lock if (max-min) <= threshold
+    double kOmegaLockSpanThreshold ; // lock if (max-min) <= threshold
     // value depends on ki and kp !!
     std::vector<double> historyOmega_;
     int historyOmegaWr_ = 0;
@@ -65,6 +65,8 @@ private:
     void* fidErr_ = nullptr;
     void* fidOmega_ = nullptr;
     void* fidPhi_ = nullptr;
+    // Interleaved float32 I,Q: 8 complex samples per symbol (evenly spaced over omega_) for eye plots.
+    void* fidOut8Sps_ = nullptr;
 #endif
 };
 

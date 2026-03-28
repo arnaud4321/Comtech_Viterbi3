@@ -186,7 +186,8 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
     SymbolRateDetected.store(false, std::memory_order_relaxed);
     SymbolRateEstimateHz.store(0.0, std::memory_order_relaxed);
   //  objGardnerTiming.Reset(2.0, 1.0e-1, 1.0e-3, 1);
-    objGardnerTiming.Reset(2.0, 1.0e-5, 1.0e-7, 64);
+    objGardnerTiming.Reset(2.0, 1.0e-4, 1.0e-6, 64);
+    //objGardnerTiming.Reset(2.00004, 0.0, 0.0, 64);
 
     FilterThread = std::thread(&Receiver::OperateFilter, this);
     ViterbiManagerThread = std::thread(&Receiver::OperateViterbiManager, this);

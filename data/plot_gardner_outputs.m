@@ -5,6 +5,7 @@
 %   - gardner_late.bin
 %   - gardner_err.bin
 %   - gardner_omega.bin
+%   - gardner_output_8sps_iq.bin (8 complex samples per symbol, evenly spaced over omega_; eye at Gardner output)
 %
 % Files contain interleaved float32 I,Q complex samples.
 % User provides start time (seconds) and number of monitored samples.
@@ -13,9 +14,11 @@ clear; close all;
 
 Fs_in = 21.42e6;            % input sampling frequency (2 sps)
 Fs_out = Fs_in / 2;         % Gardner outputs one sample per symbol
+sps_gardner_dump = 8;       % samples per symbol in gardner_output_8sps_iq.bin
+Fs_gardner_8 = Fs_out * sps_gardner_dump;
 
-start_sec=0.5;
-num_samples=10000;
+start_sec=0;
+num_samples=10000000;
 
 if (num_samples==0)
     start_sec = input('Start time [s] (wrt Fs_in): ');
@@ -36,6 +39,7 @@ fn_omega = 'gardner_omega.bin';
 fn_phi = 'gardner_phi.bin';
 fn_vit_in = 'viterbi_input_from_gardner.bin';
 fn_gin = 'gardner_input_iq.bin';
+fn_gout = 'gardner_output_8sps_iq.bin';
 
 % Read early
 fidE = fopen(fn_early, 'rb');
@@ -129,6 +133,19 @@ else
     rawGin = fread(fidGin, [2, 2*num_samples], 'float32=>double');
     fclose(fidGin);
     zGin = complex(rawGin(1,:), rawGin(2,:));
+end
+
+% Gardner output at 8 sps (8 IQ pairs per symbol, spaced over one omega_)
+start_idx_gout8 = max(0, round(start_sec * Fs_gardner_8));
+fidGout = fopen(fn_gout, 'rb');
+if fidGout == -1
+    warning('Cannot open file: %s (skipping Gardner output eye plot)', fn_gout);
+    zGout = [];
+else
+    fseek(fidGout, start_idx_gout8 * 2 * 4, 'bof');
+    rawGout = fread(fidGout, [2, sps_gardner_dump * num_samples], 'float32=>double');
+    fclose(fidGout);
+    zGout = complex(rawGout(1,:), rawGout(2,:));
 end
 
 % Read symbols actually sent to Viterbi (float32 IQ interleaved)
@@ -253,6 +270,31 @@ if ~isempty(zGin)
         end
         grid on; xlabel('Symbol time'); ylabel('Q');
         title('Eye diagram at Gardner input (Q)');
+    end
+end
+
+if ~isempty(zGout)
+    sps = sps_gardner_dump;
+    win = 2 * sps;  % two symbol periods at 8 sps
+    nTrace = min(2000, floor((numel(zGout) - win) / sps));
+    if nTrace > 0
+        tEye = (0:win-1) / sps;
+        figure('Name', 'Gardner output eye diagram (8 samples per symbol)');
+        subplot(1,2,1); hold on;
+        for k = 0:nTrace-1
+            idx = 1 + k * sps;
+            plot(tEye, real(zGout(idx:idx+win-1)), 'b-');
+        end
+        grid on; xlabel('Symbol time'); ylabel('I');
+        title('Eye at Gardner output (I)');
+
+        subplot(1,2,2); hold on;
+        for k = 0:nTrace-1
+            idx = 1 + k * sps;
+            plot(tEye, imag(zGout(idx:idx+win-1)), 'r-');
+        end
+        grid on; xlabel('Symbol time'); ylabel('Q');
+        title('Eye at Gardner output (Q)');
     end
 end
 

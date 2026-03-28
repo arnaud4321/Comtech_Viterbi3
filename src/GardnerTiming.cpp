@@ -12,6 +12,7 @@
 #include <iostream>
 #endif
 
+
 #ifdef DEBUG_GARDNER_DEBIT
 namespace
 {
@@ -51,6 +52,8 @@ void GardnerTiming::Reset(double omegaNom, double kp, double ki, int updatePerio
     absWrite_ = 0;
     tAbs_ = 0.0;
     tInit_ = false;
+
+    kOmegaLockSpanThreshold=50.0*ki; // heuristic..
 
     const double omegaUpdatesPerSec = SymbolRate / static_cast<double>(updatePeriod_);
     const double desiredStride =
@@ -138,8 +141,8 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
         const float lI = InterpLagrange4I(tAbs_ + 0.5);
         const float lQ = InterpLagrange4Q(tAbs_ + 0.5);
         
-        outI[outCount] = lI;
-        outQ[outCount] = lQ;
+        outI[outCount] = InterpLagrange4I(tAbs_);
+        outQ[outCount] = InterpLagrange4Q(tAbs_);
 
 #ifdef DEBUG_GARDNER_OUTPUTS
         dbgEarly.push_back(eI);
@@ -148,11 +151,35 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
         dbgOnTime.push_back(yQ); 
         dbgLate.push_back(lI);
         dbgLate.push_back(lQ);
+        // 8 samples per symbol at Gardner output (interpolated along one symbol length omega_).
+        if (fidOut8Sps_)
+        {
+            constexpr int kOutSps = 8;
+            const double w = omega_;
+            double t8[kOutSps];
+            bool ok8 = true;
+            for (int k = 0; k < kOutSps; ++k)
+            {
+                t8[k] = tAbs_ - 0.5 * w + (static_cast<double>(k) + 0.5) * (w / static_cast<double>(kOutSps));
+                if (!CanInterp(t8[k]))
+                    ok8 = false;
+            }
+            if (ok8)
+            {
+                for (int k = 0; k < kOutSps; ++k)
+                {
+                    const float ii = InterpLagrange4I(t8[k]);
+                    const float qq = InterpLagrange4Q(t8[k]);
+                    float iq[2] = {ii, qq};
+                    std::fwrite(iq, sizeof(float), 2, static_cast<FILE*>(fidOut8Sps_));
+                }
+            }
+        }
 #endif
 
         // Gardner TED on complex signal (use current on-time symbol).
- //       errorAcc_ += (lI - eI) * yI + (lQ - eQ) * yQ;
-       errorAcc_ += (eI - lI) * yI + (eQ - lQ) * yQ;
+        errorAcc_ += (lI - eI) * yI + (lQ - eQ) * yQ;
+ //      errorAcc_ += (eI - lI) * yI + (eQ - lQ) * yQ;
 
 #ifdef DEBUG_GARDNER_OUTPUTS
         dbgErr.push_back(errorAcc_);
@@ -192,6 +219,8 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
         std::fwrite(dbgOmega.data(), sizeof(float), static_cast<size_t>(outCount), static_cast<FILE*>(fidOmega_));
         std::fwrite(dbgPhi.data(), sizeof(float), static_cast<size_t>(outCount), static_cast<FILE*>(fidPhi_));
     }
+    if (fidOut8Sps_)
+        std::fflush(static_cast<FILE*>(fidOut8Sps_));
 #endif
 
     const double tLoopEnd = tAbs_;
@@ -332,7 +361,7 @@ float GardnerTiming::InterpLagrange4Q(double t) const
 #ifdef DEBUG_GARDNER_OUTPUTS
 void GardnerTiming::OpenDebugFilesIfNeeded()
 {
-    if (fidEarly_ && fidOnTime_ && fidLate_ && fidErr_ && fidOmega_ && fidPhi_)
+    if (fidEarly_ && fidOnTime_ && fidLate_ && fidErr_ && fidOmega_ && fidPhi_ && fidOut8Sps_)
         return;
     mkdir("../data", 0755);
     if (!fidEarly_)
@@ -347,6 +376,8 @@ void GardnerTiming::OpenDebugFilesIfNeeded()
         fidOmega_ = std::fopen("../data/gardner_omega.bin", "wb");
     if (!fidPhi_)
         fidPhi_ = std::fopen("../data/gardner_phi.bin", "wb");
+    if (!fidOut8Sps_)
+        fidOut8Sps_ = std::fopen("../data/gardner_output_8sps_iq.bin", "wb");
 }
 
 void GardnerTiming::CloseDebugFiles()
@@ -380,6 +411,11 @@ void GardnerTiming::CloseDebugFiles()
     {
         std::fclose(static_cast<FILE*>(fidPhi_));
         fidPhi_ = nullptr;
+    }
+    if (fidOut8Sps_)
+    {
+        std::fclose(static_cast<FILE*>(fidOut8Sps_));
+        fidOut8Sps_ = nullptr;
     }
 }
 #endif
