@@ -1,0 +1,7 @@
+#!/bin/sh
+# Remove Cursor IDE footer from commit messages (all commit types).
+MSG_FILE=$1
+[ -n "$MSG_FILE" ] && [ -f "$MSG_FILE" ] || exit 0
+# Match "Made-with: Cursor" with optional trailing whitespace / CR
+sed -i '/^[Mm]ade-with:.*[Cc]ursor[[:space:]]*$/d' "$MSG_FILE"
+exit 0
