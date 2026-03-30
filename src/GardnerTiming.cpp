@@ -53,7 +53,7 @@ void GardnerTiming::Reset(double omegaNom, double kp, double ki, int updatePerio
     tAbs_ = 0.0;
     tInit_ = false;
 
-    kOmegaLockSpanThreshold=50.0*ki; // heuristic..
+    kOmegaLockSpanThreshold=100.0*ki; // heuristic..
 
     const double omegaUpdatesPerSec = SymbolRate / static_cast<double>(updatePeriod_);
     const double desiredStride =
