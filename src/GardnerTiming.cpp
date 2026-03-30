@@ -279,16 +279,9 @@ void GardnerTiming::PushOmegaHistoryOnUpdate()
     }
     const bool prevLocked = locked_;
     locked_ = (std::abs(vmax - vmin) <= kOmegaLockSpanThreshold);
-    if (locked_ != prevLocked)
-    {
-        const double span = std::abs(vmax - vmin);
-        const double tSec = tAbs_ / SamplingRate;
-        std::fprintf(stderr,
-                     "[GardnerTiming] %s at t=%0.9f s (omega span=%g, thr=%g, omega=%g, strideUpdates=%d)\n",
-                     locked_ ? "LOCKED" : "UNLOCKED",
-                     tSec, span, kOmegaLockSpanThreshold, omega_, omegaLockStrideUpdates_);
-        std::fflush(stderr);
-    }
+    // State-change logging is handled at the receiver level so we can print both:
+    // - wall-clock simulation time (t_sim)
+    // - rate-based time from the sample counters (t_rate)
 }
 
 void GardnerTiming::PushToRing(const float* inI, const float* inQ, int inLen)

@@ -1,6 +1,8 @@
 #include "AWGNChannel.h"
 #include "Transmitter.h"
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 extern bool Finish;
 extern mutex mtxfilethr;
 AWGNChannel::AWGNChannel(unsigned int Seed):NoiseQ(LengthQueue),OutputBuffer(128*TxOutputBatchSize,2*TxOutputBatchSize)
@@ -53,13 +55,36 @@ void AWGNChannel::StartThreads(void)
     TransitionCounter[2] = TransitionCounter[1] + n1;//End of Acc 1
     TransitionCounter[3] = TransitionCounter[2] + n2;//End of Stable 2
     TransitionCounter[4] = TransitionCounter[3] + n1;//End of Acc 2
-    
-    
-    
+
     NoiseQ.Reset();
+
+    const double ppmDoppler =
+        pParams->FrequencyShift * 1.0e6 / (pParams->CarrierToSymbolRateRatio * SymbolRate);
+    const double totalPpm = pParams->ClockMismatchPpm + ppmDoppler;
+    const double eps = totalPpm * 1.0e-6;
+    const double actualSymbolRate = SymbolRate * (1.0 + eps);
+
+    std::cout << std::fixed << std::setprecision(6) << "[AWGN] Channel parameters\n"
+              << "        Es/N0 (dB):                    " << pParams->EsN0 << '\n'
+              << "        FrequencyShift (Hz):         " << pParams->FrequencyShift << '\n'
+              << "        ClockMismatchPpm:            " << pParams->ClockMismatchPpm << '\n'
+              << "        CarrierToSymbolRateRatio:    " << pParams->CarrierToSymbolRateRatio
+              << " (fc/Rs)\n"
+              << "        Symbol rate Rs (sym/s):      " << SymbolRate << '\n'
+              << "        Actual Rs from ppm (sym/s):  " << actualSymbolRate << '\n'
+              << "        AccelerationPeriod (s):      " << pParams->AccelerationPeriod << '\n'
+              << "        StablePeriod (s):            " << pParams->StablePeriod << '\n'
+              << "        TotalPeriod (s):             " << pParams->TotalPeriod << '\n'
+              << "        SamplingClockOffset total ppm: " << totalPpm << '\n'
+              << "          clock mismatch component:  " << pParams->ClockMismatchPpm << '\n'
+              << "          Doppler component:         " << ppmDoppler << '\n'
+              << "          (Doppler from FrequencyShift / (fc/Rs) / Rs)\n";
+
+    samplingClockOffset_.Configure(totalPpm);
+    samplingClockOffset_.Start(&OutputBuffer, &mtxOutputBuffer_, &CvUserOut, &CvOutUser, &StopAll);
+
     NoiseThread = std::thread(&AWGNChannel::GenerateNoise, this);
     OutputThread = std::thread(&AWGNChannel::GenerateOutput, this);
-
 }
 
 
@@ -75,6 +100,7 @@ void AWGNChannel::StopThreads(void)
         NoiseThread.join();
     if(OutputThread.joinable())
         OutputThread.join();
+    samplingClockOffset_.StopJoin();
 }
 
 
@@ -132,26 +158,18 @@ void AWGNChannel::GenerateOutput(void)
         std::unique_lock<std::mutex> lkNoise(mtxNoiseQ_);
         unsigned int PtrRdNoise = NoiseQ.GetPtrRd();
 
-        alignas(32) float txChunk[TxOutputBatchSize];
-        if (!pTx->CopyOutputSamples(txChunk, TxOutputBatchSize, StopAll))
+        alignas(32) float noisyChunk[TxOutputBatchSize];
+        if (!pTx->CopyOutputSamples(noisyChunk, TxOutputBatchSize, StopAll))
             break;
 
         {
-            std::unique_lock<std::mutex> lk(mtxOutputBuffer_);
-            while (OutputBuffer.AlmostFull() && !StopAll)
-                CvUserOut.wait(lk); 
-            if (StopAll)
-                break;
-            short* Output = OutputBuffer.GetWriteBuffer(TxOutputBatchSize);
-
-            unsigned int PtrOut = 0;
             __m256 mStdn = _mm256_set1_ps(Stdn);
             for (int i = 0; i < TxOutputBatchSize;)
             {
-                __m256 mInl = _mm256_loadu_ps(txChunk + i);
+                __m256 mInl = _mm256_loadu_ps(noisyChunk + i);
                 __m256 mOutl = _mm256_loadu_ps(Noise[PtrRdNoise] + i);
                 i += 8;
-                __m256 mInh = _mm256_loadu_ps((txChunk + i));
+                __m256 mInh = _mm256_loadu_ps(noisyChunk + i);
                 __m256 mOuth = _mm256_loadu_ps(Noise[PtrRdNoise] + i);
                 i += 8;
                 mOutl = _mm256_mul_ps(mStdn, mOutl);
@@ -160,14 +178,27 @@ void AWGNChannel::GenerateOutput(void)
                 mOutl = _mm256_fmadd_ps(mInl, mkSig, mOutl);
                 mOuth = _mm256_fmadd_ps(mInh, mkSig, mOuth);
 
-                __m256i mOuti = floats_to_shorts_sat_perm_avx2(mOutl, mOuth);
-                _mm256_storeu_si256((__m256i*)(Output + PtrOut), mOuti);
-                PtrOut += 16;
+                _mm256_storeu_ps(noisyChunk + i - 16, mOutl);
+                _mm256_storeu_ps(noisyChunk + i - 8, mOuth);
             }
-            NumSamples += PtrOut;
+            NumSamples += static_cast<unsigned int>(TxOutputBatchSize);
+        }
 
 #ifdef DEBUG_AWGN
-            std::copy(Output, Output + TxOutputBatchSize, OutAllI + PtrOutAll);
+        {
+            alignas(32) short dbgOut[TxOutputBatchSize];
+            unsigned int PtrOut = 0;
+            for (int i = 0; i < TxOutputBatchSize;)
+            {
+                __m256 mInl = _mm256_loadu_ps(noisyChunk + i);
+                i += 8;
+                __m256 mInh = _mm256_loadu_ps(noisyChunk + i);
+                i += 8;
+                __m256i mOuti = floats_to_shorts_sat_perm_avx2(mInl, mInh);
+                _mm256_storeu_si256((__m256i*)(dbgOut + PtrOut), mOuti);
+                PtrOut += 16;
+            }
+            std::copy(dbgOut, dbgOut + TxOutputBatchSize, OutAllI + PtrOutAll);
             PtrOutAll += TxOutputBatchSize;
             cout << "Collected " << PtrOutAll << endl;
             if (PtrOutAll >= 1100000)
@@ -180,13 +211,14 @@ void AWGNChannel::GenerateOutput(void)
 
                 Finish = true;
             }
-#endif
-            OutputBuffer.AdvancePtrWr(TxOutputBatchSize);
         }
+#endif
+
+        samplingClockOffset_.EnqueueNoisyInterleaved(noisyChunk, TxOutputBatchSize);
+
         NoiseQ.AdvanceRead();
         lkNoise.unlock();
         CvOutNoise.notify_one();
-        CvOutUser.notify_one();
     }
 }
 

@@ -2,6 +2,7 @@
 //
 
 #include "definitions.h"
+#include <iomanip>
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -72,7 +73,9 @@ int main(int argc, char* argv[])
         	std::chrono::duration<double> elapsed = Now - Start;
 			cout<<"Elapsed Time "<<elapsed.count()<<endl;
 			cout<<"EsN0 "<<objParams.EsN0<<" Number of Decoded Bits "<<oRx.NumBitsAll<<" Number of Errors "<<oRx.NumErrorsAll<<endl;
-			cout<<"BER "<<double(oRx.NumErrorsAll)/double(oRx.NumBitsAll)<<endl;
+			cout << "BER " << std::scientific << std::setprecision(6)
+			     << (static_cast<double>(oRx.NumErrorsAll) / static_cast<double>(oRx.NumBitsAll))
+			     << std::defaultfloat << endl;
 			#ifdef DEBUG_STATISTICS
 			cout<<"Average Metrics Growth "<<oRx.CurrDebugStatistics.MeanMetricsGrowth<<endl;
 			cout<<"Max Metrics Growth "<<oRx.CurrDebugStatistics.MaxMetricsGrowth<<endl;

@@ -25,8 +25,11 @@ void Params::ReadParams(string FileName)
 
     TxFileName = j["Transmitter"]["FileName"];
 	EsN0 = j["Channel"]["Esn0"];
-    TimeDrift =  j["Channel"]["Drift"];
     FrequencyShift = j["Channel"]["FrequencyShift"];
+    ClockMismatchPpm = j["Channel"].value("ClockMismatchPpm", 0.0);
+    CarrierToSymbolRateRatio = j["Channel"].value("CarrierToSymbolRateRatio", 935.0);
+    if (CarrierToSymbolRateRatio <= 0.0)
+        CarrierToSymbolRateRatio = 935.0;
     AccelerationPeriod = j["Channel"]["AccelerationPeriod"];
     StablePeriod = j["Channel"]["StablePeriod"];
     TotalPeriod = 2*(AccelerationPeriod + StablePeriod);

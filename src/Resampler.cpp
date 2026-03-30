@@ -49,7 +49,10 @@ void Resampler::CreateObjects()
 
 
 
-unsigned int Resampler::CreateOutputs(float *InI, float *InQ, float *OutputI, float *OutputQ, double Advance, unsigned int &Start, double Frac, unsigned int Length)
+unsigned int Resampler::CreateOutputs(const float *InI, const float *InQ,
+                                      float *OutputI, float *OutputQ,
+                                      double Advance, unsigned int &Start, double &Frac,
+                                      unsigned int Length, unsigned int outMax)
 {
 	if ((Advance < 0.5))
 	{
@@ -61,25 +64,25 @@ unsigned int Resampler::CreateOutputs(float *InI, float *InQ, float *OutputI, fl
 
 	
 
-	while (Start < (Length-3))
+	while (Start < (Length-3) && PtrOut < outMax)
 	{
 		//Prepare Table Index
 		unsigned int TableIndex = (Accumulator >> (ACCUMULATOR_WIDTH - Log2LagrangeTableLength)); //There are 4 coefficients per row
 		TableIndex = (TableIndex << 2);
-		MM mInputI = _mm_loadu_ps(&InI[Start]);
-		MM mInputQ = _mm_loadu_ps(&InQ[Start]);
-		MM2 mInputIQ = _mm256_castps128_ps256(mInputI);
+		__m128 mInputI = _mm_loadu_ps(&InI[Start]);
+		__m128 mInputQ = _mm_loadu_ps(&InQ[Start]);
+		__m256 mInputIQ = _mm256_castps128_ps256(mInputI);
 		mInputIQ = _mm256_insertf128_ps(mInputIQ, mInputQ, 1);
 		//Load Coefficients
-		MM Coefficients = _mm_loadu_ps(&LagrangeTable[TableIndex]);
-		MM2 Coefficients2 = _mm256_castps128_ps256(Coefficients);
+		__m128 Coefficients = _mm_loadu_ps(&LagrangeTable[TableIndex]);
+		__m256 Coefficients2 = _mm256_castps128_ps256(Coefficients);
 		Coefficients2 = _mm256_insertf128_ps(Coefficients2, Coefficients, 1);
 		mInputIQ = _mm256_mul_ps(mInputIQ, Coefficients2); //I0,I1,I2,I3,Q0,Q1,Q2,Q3
-		MM2 Results = _mm256_hadd_ps(mInputIQ, mInputIQ);//I01,I23,I01,I23, Q01,Q23,Q01,Q23
-		MM ResultsIa = _mm256_castps256_ps128(Results);//I01,I23,I01,I23
-		MM ResultsQa = _mm256_extractf128_ps(Results,1);//Q01,Q23,Q01,Q23
+		__m256 Results = _mm256_hadd_ps(mInputIQ, mInputIQ);//I01,I23,I01,I23, Q01,Q23,Q01,Q23
+		__m128 ResultsIa = _mm256_castps256_ps128(Results);//I01,I23,I01,I23
+		__m128 ResultsQa = _mm256_extractf128_ps(Results,1);//Q01,Q23,Q01,Q23
 
-		MM Results0 = _mm_hadd_ps(ResultsIa,ResultsQa);//I,I,Q,Q
+		__m128 Results0 = _mm_hadd_ps(ResultsIa,ResultsQa);//I,I,Q,Q
 		_mm_store_ss(OutputI+PtrOut,Results0);
 		Results0 = _mm_castsi128_ps( _mm_srli_si128(_mm_castps_si128(Results0), 8));
 		_mm_store_ss(OutputQ + PtrOut, Results0);

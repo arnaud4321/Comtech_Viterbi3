@@ -5,9 +5,7 @@
 #define ACCUMULATOR_WIDTH 30
 #include <immintrin.h>
 #include <math.h>
-#include <immintrin.h>
-#define MM __m128
-#define MM2 __m256
+// Note: avoid short type macros (MM/MM2) to prevent collisions with other headers.
 
 class Resampler
 {
@@ -19,7 +17,16 @@ class Resampler
 public:
 	Resampler();
 	~Resampler();
-	unsigned int CreateOutputs(float *InI, float *InQ, float *OutputI, float *OutputQ, double Advance, unsigned int &Start, double Frac, unsigned int Length);
+	/// Fractional-delay resampling using cubic Lagrange interpolation.
+	/// - Advance: input samples consumed per output sample (>= 0.5).
+	/// - Start: input index cursor (advanced on return).
+	/// - Frac: fractional phase in [0,1) (updated on return).
+	/// - Length: available input length (must have Start < Length-3 to interpolate).
+	/// - outMax: max output samples to generate (prevents output buffer overflow).
+	unsigned int CreateOutputs(const float *InI, const float *InQ,
+	                          float *OutputI, float *OutputQ,
+	                          double Advance, unsigned int &Start, double &Frac,
+	                          unsigned int Length, unsigned int outMax);
 
 };
 

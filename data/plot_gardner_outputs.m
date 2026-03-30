@@ -18,7 +18,7 @@ sps_gardner_dump = 8;       % samples per symbol in gardner_output_8sps_iq.bin
 Fs_gardner_8 = Fs_out * sps_gardner_dump;
 
 start_sec=0;
-num_samples=10000000;
+num_samples=1000000;
 
 if (num_samples==0)
     start_sec = input('Start time [s] (wrt Fs_in): ');

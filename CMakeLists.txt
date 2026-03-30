@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.5)
 
-# Compilateur Intel oneAPI optionnel (à définir avant project())
+# Optional Intel oneAPI compiler (set before project())
 set(INTEL_COMPILER_ROOT "/opt/intel/oneapi/compiler/latest" CACHE PATH "Intel oneAPI compiler installation directory")
 if(EXISTS "${INTEL_COMPILER_ROOT}/bin/icpx")
 	set(CMAKE_C_COMPILER "${INTEL_COMPILER_ROOT}/bin/icx")
@@ -14,7 +14,7 @@ project(viterbi3 CXX)
 
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER_ID} - ${CMAKE_CXX_COMPILER}")
 
-# Pour clangd / "Go to Implementation" (Ctrl+F12)
+# For clangd / "Go to Implementation" (Ctrl+F12)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 IF(NOT CMAKE_BUILD_TYPE)
@@ -35,7 +35,7 @@ set(CMAKE_SYSTEM_NAME Linux)
 # specify the C++ standard
 set(CMAKE_CXX_STANDARD 20)
 
-# c++ (flags selon le compilateur détecté : Intel icpx ou GCC)
+# C++ flags depend on detected compiler: Intel icpx or GCC
 if(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
 	set(CMAKE_CXX_FLAGS_DEBUG "-D_DEBUG -O0 -g -xCORE-AVX2 -mrdrnd")
 	set(CMAKE_CXX_FLAGS_RELEASE "-O3 -xCORE-AVX2 -ipo -mrdrnd")
@@ -64,6 +64,6 @@ target_include_directories(${PROJECT_NAME} PUBLIC src ${IPP_ROOT}/include/ipp)
 target_link_directories(${PROJECT_NAME} PRIVATE ${IPP_ROOT}/lib/intel64)
 target_link_libraries(${PROJECT_NAME} uhd pthread boost_system boost_program_options ipps ippcore fftw3f)
 
-# Lien symbolique pour que clangd trouve compile_commands.json à la racine (Ctrl+F12)
+# Symlink so clangd finds compile_commands.json at repo root (Ctrl+F12)
 execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json
 	WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

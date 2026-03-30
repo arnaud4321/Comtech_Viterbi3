@@ -1,6 +1,6 @@
 #pragma once
 // Uncomment to dump early/on-time/late (3 *.bin files): block-based writes, not per-symbol.
-#define DEBUG_GARDNER_OUTPUTS
+//#define DEBUG_GARDNER_OUTPUTS
 // #define DEBUG_GARDNER_DEBIT
 
 #include <vector>

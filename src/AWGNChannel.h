@@ -8,8 +8,8 @@ class Transmitter;
 #include "SimpleQueue.h"
 #include "BufferShort.h"
 #include "FrequencyOffset.h"
+#include "ChannelSamplingClockOffset.h"
 #include "Params.h"
-#include "definitions.h"
 using namespace std;
 
 //#define DEBUG_AWGN
@@ -35,6 +35,7 @@ private:
     static constexpr int LengthQueue = 4;
     float *Noise[LengthQueue];
     thread NoiseThread, OutputThread;
+    ChannelSamplingClockOffset samplingClockOffset_;
     void GenerateNoise(void);
     void GenerateOutput(void);
     SimpleQueue NoiseQ;

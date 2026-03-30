@@ -40,7 +40,7 @@ public:
     {
         pChannel = p;
     }
-    /// Lecture + AdvancePtrRd sous mutex (thread filtre vs thread sampler).
+    /// Read plus AdvancePtrRd under mutex (filter thread vs sampler thread).
     bool ReadFilterBatch(short* dst, int nShorts, bool& stopAll);
     void NotifyFilterWaiters() { CvSamplerUser.notify_all(); }
     condition_variable* GetCvOut(void)

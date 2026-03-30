@@ -14,8 +14,12 @@ public:
     string TxFileName;
     double EsN0;
     double RollOff;
-    double TimeDrift;
     double FrequencyShift;
+    /// Fixed ppm: Tx/Rx oscillator mismatch on the symbol clock.
+    double ClockMismatchPpm;
+    /// Carrier frequency / symbol rate R_s (dimensionless). Maps RF shift (FrequencyShift, Hz)
+    /// to relative error on R_s: ppm_doppler ≈ FrequencyShift·10⁶ / (CarrierToSymbolRateRatio · R_s).
+    double CarrierToSymbolRateRatio;
     double AccelerationPeriod;
     double TotalPeriod, StablePeriod;
     SimModes SimMode;

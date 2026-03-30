@@ -16,7 +16,8 @@
 #include "SelfSyncScrambler_V35.h"
 #include "Prbs23.h"
 #include "SymbolRateEstimator.h"
-#include "GardnerTiming.h"
+#include "ReceiverResampler.h"
+#include "ReceiverTimingTracking.h"
 #include <atomic>
 using namespace std;
 //#define DEBUG1
@@ -26,11 +27,6 @@ using namespace std;
 // Uncomment to bypass Gardner (TakeEven 2x->1 sps), dump Viterbi input symbols to ../data/viterbi_input_bypass.bin
 // (float32 interleaved I,Q per symbol), then compare offline with Gardner on-time dump via compare_viterbi_gardner_dump.m
 //#define BYPASS_GARDNER_DUMP_VITERBI_INPUT
-
-// Insert a fixed sampling-clock offset (SCO) at Gardner input (2 sps stream).
-// This simulates a constant rhythm error without using the Resampler module.
-#define DEBUG_GARDNER_INPUT_SCO
-#define DEBUG_GARDNER_INPUT_SCO_PPM 10.0
 
 class Sampler;
 struct DebugStatistics
@@ -75,14 +71,15 @@ private:
     double SymRateEstimatePeriodSec = 1.0;
     double SymRatePeakToMedianThreshold = 8.0;
     double SymRateMaxRelativeJump = 0.02;
-    GardnerTiming objGardnerTiming;
+    ReceiverResampler resampler_;
+    ReceiverTimingTracking timingTracking_;
     Sampler *pSampler;
     BufferFloat oBufferFilter;
+    BufferFloat oBufferResampled{SPB*256,32*SPB};
     Viterbi oViterbi[3] = {Viterbi(0),Viterbi(1),Viterbi(2)};
     bool StopAll;
     float *SplitI[3], *SplitQ[3];
     unsigned char *Outputs[3];
-    float *OneSpsI, *OneSpsQ;
     void OperateFilter(void);
     int IndexViterbi[3] = {0,1,2};
     void OperateViterbiManager(void);
@@ -93,9 +90,11 @@ private:
     float *FilterInI,  *FilterInQ;
     void shorts_to_floats_avx2(__m256i v16, __m256* out0, __m256* out1);
     condition_variable CvFilterUser,CvRx2Out,CvOut2Rx;
+    condition_variable CvResampData;
     condition_variable CvVitManager2Vit;
     condition_variable CvViterbis2VitManager[3];
     std::mutex mtxFilterRing;
+    std::mutex mtxResampRing;
     // Protects all SimpleQueue (DemodulatorQ, DecodedQ, OutputQ) + associated flags.
     std::mutex mtxQueues;
 

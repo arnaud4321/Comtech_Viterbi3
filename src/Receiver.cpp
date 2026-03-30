@@ -10,107 +10,10 @@
 
 extern std::mutex mtxfilethr;
 
-#ifdef DEBUG_GARDNER_INPUT_SCO
-namespace
-{
-inline int ClampIndexSco(int idx, int lo, int hi)
-{
-    return std::max(lo, std::min(hi, idx));
-}
-
-struct ScoRingBuffer
-{
-    static constexpr int kSize = 1 << 19; // power of 2
-    static constexpr int kMask = kSize - 1;
-
-    alignas(32) float ringI[kSize] = {};
-    alignas(32) float ringQ[kSize] = {};
-    long long absWrite = 0; // absolute sample index of next write
-
-    void PushBlock(const float* inI, const float* inQ, int n)
-    {
-        for (int i = 0; i < n; ++i)
-        {
-            const long long a = absWrite + static_cast<long long>(i);
-            ringI[static_cast<int>(a) & kMask] = inI[i];
-            ringQ[static_cast<int>(a) & kMask] = inQ[i];
-        }
-        absWrite += static_cast<long long>(n);
-    }
-
-    long long OldestAbs() const { return absWrite - static_cast<long long>(kSize); }
-    long long NewestAbs() const { return absWrite - 1; }
-
-    float GetI(long long absIdx) const { return ringI[static_cast<int>(absIdx) & kMask]; }
-    float GetQ(long long absIdx) const { return ringQ[static_cast<int>(absIdx) & kMask]; }
-
-    bool CanInterp(double t) const
-    {
-        const long long k = static_cast<long long>(std::floor(t));
-        return (k - 1 >= OldestAbs()) && (k + 2 < absWrite);
-    }
-
-    float InterpLagrange4I(double t) const
-    {
-        const long long k = static_cast<long long>(std::floor(t));
-        const double mu = t - static_cast<double>(k);
-        const float x0 = GetI(k - 1);
-        const float x1 = GetI(k + 0);
-        const float x2 = GetI(k + 1);
-        const float x3 = GetI(k + 2);
-
-        const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
-        const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
-        const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
-        const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
-
-        return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3);
-    }
-
-    float InterpLagrange4Q(double t) const
-    {
-        const long long k = static_cast<long long>(std::floor(t));
-        const double mu = t - static_cast<double>(k);
-        const float x0 = GetQ(k - 1);
-        const float x1 = GetQ(k + 0);
-        const float x2 = GetQ(k + 1);
-        const float x3 = GetQ(k + 2);
-
-        const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
-        const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
-        const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
-        const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
-
-        return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3);
-    }
-};
-
-inline float InterpLagrange4Sco(const float* x, int len, double t)
-{
-    int k = static_cast<int>(std::floor(t));
-    k = ClampIndexSco(k, 1, len - 3);
-    const double mu = t - static_cast<double>(k);
-    const float x0 = x[k - 1];
-    const float x1 = x[k + 0];
-    const float x2 = x[k + 1];
-    const float x3 = x[k + 2];
-
-    const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
-    const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
-    const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
-    const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
-
-    return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3);
-}
-} // namespace
-#endif
-
 Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB),OutputQ(LengthQueue)
 {
     FilterInI = (float*) _mm_malloc(SPB*2*sizeof(float),32);
     FilterInQ = FilterInI + SPB;
-    OneSpsI = (float*) _mm_malloc(2*ReceiverInputBatchIQSymbols*sizeof(float),32);
-    OneSpsQ = OneSpsI + ReceiverInputBatchIQSymbols;
     for(int i = 0; i < 3; i++)
     {
         SplitI[i] = (float*) _mm_malloc(BatchSize1*LengthQueue*sizeof(float),32);
@@ -142,7 +45,6 @@ Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB),OutputQ(LengthQueue
 Receiver::~Receiver()
 {
     _mm_free(FilterInI);
-    _mm_free(OneSpsI);
     _mm_free(Merged);
     _mm_free(OutputAll);
     _mm_free(PrbsOut);
@@ -185,9 +87,12 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
     SymRateAcceptedCount = 0;
     SymbolRateDetected.store(false, std::memory_order_relaxed);
     SymbolRateEstimateHz.store(0.0, std::memory_order_relaxed);
-  //  objGardnerTiming.Reset(2.0, 1.0e-1, 1.0e-3, 1);
-    objGardnerTiming.Reset(2.0, 1.0e-4, 1.0e-6, 64);
-    //objGardnerTiming.Reset(2.00004, 0.0, 0.0, 64);
+    oBufferResampled.Reset();
+    resampler_.Start(&oBufferFilter, &mtxFilterRing, &CvFilterUser,
+                     &oBufferResampled, &mtxResampRing, &CvResampData,
+                     &CvResampData, &StopAll);
+    timingTracking_.ResetGardner(2.0, 1.0e-4, 1.0e-6, 64);
+    timingTracking_.Start(&oBufferResampled, &mtxResampRing, &CvResampData, &StopAll);
 
     FilterThread = std::thread(&Receiver::OperateFilter, this);
     ViterbiManagerThread = std::thread(&Receiver::OperateViterbiManager, this);
@@ -207,8 +112,11 @@ void Receiver::StopThreads(void)
     CvOut2Rx.notify_all();
     CvVitManager2Vit.notify_all();
     CvFilterUser.notify_all();
+    CvResampData.notify_all();
     if(FilterThread.joinable())
         FilterThread.join();
+    resampler_.StopJoin();
+    timingTracking_.StopJoin();
     for(int i = 0; i < 3;i++)
         CvViterbis2VitManager[i].notify_one();
     for(int i = 0; i < 3;i++)
@@ -224,6 +132,8 @@ void Receiver::OperateFilter(void)
 {
     auto throughput_window_start = std::chrono::steady_clock::now();
     uint64_t samples_in_window = 0;
+    uint64_t samples_total = 0;
+    const auto wall_start = std::chrono::steady_clock::now();
     auto symrate_display_start = std::chrono::steady_clock::now();
     auto next_symrate_start = std::chrono::steady_clock::now();
     bool symrate_collecting = false;
@@ -270,8 +180,9 @@ void Receiver::OperateFilter(void)
             float *FilterOutI, *FilterOutQ;
             oBufferFilter.GetWriteBuffer(FilterOutI, FilterOutQ, SPB);
             objRxFilter.CreateOutputs(FilterInI, FilterInQ, FilterOutI, FilterOutQ, SPB);
+            samples_total += static_cast<uint64_t>(SPB);
 
-            if (!symrate_collecting && now_sym >= next_symrate_start)
+            if (!symrate_collecting && now_sym >= next_symrate_start && !timingTracking_.IsLocked())
             {
                 symrate_collecting = true;
                 SymRateBatchCounter = 0;
@@ -286,8 +197,18 @@ void Receiver::OperateFilter(void)
 
             if (symrate_collecting)
             {
-                symRateEstimateReady = objSymRateEstimator.PushBatch(FilterOutI, FilterOutQ, SPB);
-                SymRateBatchCounter++;
+                if (timingTracking_.IsLocked())
+                {
+                    // Do not build a new symbol-rate estimate while Gardner is locked.
+                    symrate_collecting = false;
+                    SymRateBatchCounter = 0;
+                    symRateEstimateReady = false;
+                }
+                else
+                {
+                    symRateEstimateReady = objSymRateEstimator.PushBatch(FilterOutI, FilterOutQ, SPB);
+                    SymRateBatchCounter++;
+                }
             }
 
             if (SymbolRateDetected.load(std::memory_order_relaxed))
@@ -301,6 +222,7 @@ void Receiver::OperateFilter(void)
         if (symrate_collecting && symRateEstimateReady)
         {
             SymbolRateEstimateResult est = objSymRateEstimator.RunEstimation();
+            bool newSymRateEstimate = false;
             if (!SymbolRateDetected.load(std::memory_order_relaxed))
             {
                 if (est.Detected)
@@ -308,13 +230,47 @@ void Receiver::OperateFilter(void)
                     SymbolRateEstimateHz.store(est.SymbolRateHz, std::memory_order_relaxed);
                     SymbolRateDetected.store(true, std::memory_order_relaxed);
                     SymRateAcceptedCount = 1;
-                    std::cout << "Symbol rate detected: " << (est.SymbolRateHz / 1e6)
-                              << " Msym/s (FFT res " << est.FftResolutionHz
+                    resampler_.UpdateFromSymbolRateHz(est.SymbolRateHz);
+                    newSymRateEstimate = true;
+                    const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
+                    const double t_sim =
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
+                    std::cout << "[SymbolRateEstimator] Detected: " << (est.SymbolRateHz / 1e6)
+                              << " Msym/s"
+                              << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                              << " t_sim=" << t_sim << " s"
+                              << " t_rate=" << t_rate << " s"
+                              << " (search kMax=" << est.SearchKMaxBins
+                              << ", fMax=" << est.SearchMaxOffsetHz << " Hz)"
+                              << " (FFT res " << est.FftResolutionHz
                               << " Hz, peak/median " << est.PeakToMedian << ")" << std::endl;
+                }
+                else
+                {
+                    const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
+                    const double t_sim =
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
+                    std::cout << "[SymbolRateEstimator] Not detected"
+                              << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                              << " t_sim=" << t_sim << " s"
+                              << " t_rate=" << t_rate << " s"
+                              << " (reason: " << (est.FailReason ? est.FailReason : "") << ")"
+                              << " (search kMax=" << est.SearchKMaxBins
+                              << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
+                              << ", dF=" << est.FftResolutionHz << " Hz"
+                              << ", peak/median=" << est.PeakToMedian << ")"
+                              << std::endl;
                 }
             }
             else if (est.Detected)
             {
+                if (timingTracking_.IsLocked())
+                {
+                    // Skip re-estimation while Gardner is locked to avoid delocking transients.
+                    symrate_collecting = false;
+                    SymRateBatchCounter = 0;
+                    continue;
+                }
                 const double prev = SymbolRateEstimateHz.load(std::memory_order_relaxed);
                 const double rel = std::abs(est.SymbolRateHz - prev) / std::max(1.0, prev);
                 if (est.PeakToMedian >= SymRatePeakToMedianThreshold && rel <= SymRateMaxRelativeJump)
@@ -323,10 +279,47 @@ void Receiver::OperateFilter(void)
                     const double refined = (1.0 - alpha) * prev + alpha * est.SymbolRateHz;
                     SymbolRateEstimateHz.store(refined, std::memory_order_relaxed);
                     SymRateAcceptedCount++;
+                    resampler_.UpdateFromSymbolRateHz(refined);
+                    newSymRateEstimate = true;
+                    const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
+                    const double t_sim =
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
+                    const double delta_ppm = (refined - prev) * 1.0e6 / std::max(1.0, prev);
+                    std::cout << "[SymbolRateEstimator] Re-estimated: " << (refined / 1e6)
+                              << " Msym/s"
+                              << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                              << " t_sim=" << t_sim << " s"
+                              << " t_rate=" << t_rate << " s"
+                              << " (delta " << delta_ppm << " ppm, peak/median " << est.PeakToMedian << ")"
+                              << std::endl;
                 }
+            }
+            else
+            {
+                const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
+                const double t_sim =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
+                std::cout << "[SymbolRateEstimator] Re-estimation not detected"
+                          << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                          << " t_sim=" << t_sim << " s"
+                          << " t_rate=" << t_rate << " s"
+                          << " (reason: " << (est.FailReason ? est.FailReason : "") << ")"
+                          << " (search kMax=" << est.SearchKMaxBins
+                          << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
+                          << ", dF=" << est.FftResolutionHz << " Hz"
+                          << ", peak/median=" << est.PeakToMedian << ")"
+                          << std::endl;
             }
             symrate_collecting = false;
             SymRateBatchCounter = 0;
+
+            // Only display the "current estimate" line when a new estimate was accepted.
+            if (newSymRateEstimate)
+            {
+                std::cout << "Current symbol rate estimate: "
+                          << (SymbolRateEstimateHz.load(std::memory_order_relaxed) / 1e6)
+                          << " Msym/s (window " << SymRateWindowBatches << " batches)" << std::endl;
+            }
         }
 
         if (!filterAdvancedRing && SymbolRateDetected.load(std::memory_order_relaxed))
@@ -339,16 +332,8 @@ void Receiver::OperateFilter(void)
 
         if (std::chrono::duration<double>(now_sym - symrate_display_start).count() >= 1.0)
         {
-            if (SymbolRateDetected.load(std::memory_order_relaxed))
-            {
-                std::cout << "Current symbol rate estimate: "
-                          << (SymbolRateEstimateHz.load(std::memory_order_relaxed) / 1e6)
-                          << " Msym/s (window " << SymRateWindowBatches << " batches)" << std::endl;
-            }
-            else
-            {
+            if (!SymbolRateDetected.load(std::memory_order_relaxed))
                 std::cout << "Waiting for symbol-rate detection..." << std::endl;
-            }
             symrate_display_start = now_sym;
         }
 
@@ -470,11 +455,10 @@ void Receiver::OperateViterbiManager(void)
     CurrDebugStatistics.NumBatches = 0;
     #endif
     constexpr int kSymFrame = ReceiverInputBatchIQSymbols;
-    float pendingI[2 * kSymFrame];
-    float pendingQ[2 * kSymFrame];
-    int pendingCount = 0;
+    alignas(32) float pendingI[kSymFrame];
+    alignas(32) float pendingQ[kSymFrame];
 
-    while(!StopAll)
+    while (!StopAll)
     {
         //4 options for Viterbi - taking also care of Spectrum Inversion
         //(I+jQ)
@@ -487,198 +471,10 @@ void Receiver::OperateViterbiManager(void)
         //true -1 1
         //true 1 1
 
-        alignas(32) float filterChunkI[ReceiverInputBatchIQSamples];
-        alignas(32) float filterChunkQ[ReceiverInputBatchIQSamples];
-        float *FilterOutI, *FilterOutQ;
-        {
-            std::unique_lock<std::mutex> lk(mtxFilterRing);
-            oBufferFilter.GetReadBuffer(FilterOutI, FilterOutQ, ReceiverInputBatchIQSamples);
-            while ((FilterOutI == 0) && (!StopAll))
-            {
-                CvFilterUser.wait_for(lk, chrono::duration<double>(1e-3));
-                oBufferFilter.GetReadBuffer(FilterOutI, FilterOutQ, ReceiverInputBatchIQSamples);
-            #ifdef DEBUG2
-                if (FilterOutI == 0)
-                    cout << "WP C" << endl;
-            #endif
-            }
-            if (StopAll)
-                break;
-            std::memcpy(filterChunkI, FilterOutI, sizeof(float) * static_cast<size_t>(ReceiverInputBatchIQSamples));
-            std::memcpy(filterChunkQ, FilterOutQ, sizeof(float) * static_cast<size_t>(ReceiverInputBatchIQSamples));
-        }
-        #ifdef DEBUG1
-        std::copy(filterChunkI, filterChunkI + BatchSize3 * 2, OutAllI + PtrOutAll);
-        std::copy(filterChunkQ, filterChunkQ + BatchSize3 * 2, OutAllQ + PtrOutAll);
-        PtrOutAll += BatchSize3*2;
-
-        if(PtrOutAll >= NUM_SAMPLES_R1)
-        {    
-            cout<<"Collected "<<PtrOutAll<<endl;
-            FILE *fid = fopen("FilterOut.bin","wb");
-            fwrite(OutAllI,sizeof(float),PtrOutAll,fid);
-            fwrite(OutAllQ,sizeof(float),PtrOutAll,fid);
-            fclose(fid);
-            exit(-1);
-        }
-        #endif
-
+        if (!timingTracking_.WaitPopSymbolFrame(pendingI, pendingQ, kSymFrame))
+            break;
 
         {
-#ifdef BYPASS_GARDNER_DUMP_VITERBI_INPUT
-            TakeEvenDebug(filterChunkI, OneSpsI, ReceiverInputBatchIQSamples);
-            TakeEvenDebug(filterChunkQ, OneSpsQ, ReceiverInputBatchIQSamples);
-            {
-                static FILE* gVitBypassDump = nullptr;
-                if (!gVitBypassDump)
-                {
-                    mkdir("../data", 0755);
-                    gVitBypassDump = std::fopen("../data/viterbi_input_bypass.bin", "wb");
-                }
-                if (gVitBypassDump)
-                {
-                    for (int i = 0; i < kSymFrame; ++i)
-                    {
-                        float iq[2] = {OneSpsI[i], OneSpsQ[i]};
-                        std::fwrite(iq, sizeof(float), 2, gVitBypassDump);
-                    }
-                    std::fflush(gVitBypassDump);
-                }
-            }
-            std::copy(OneSpsI, OneSpsI + kSymFrame, pendingI);
-            std::copy(OneSpsQ, OneSpsQ + kSymFrame, pendingQ);
-            pendingCount = kSymFrame;
-#else
-#ifdef DEBUG_GARDNER_INPUT_SCO
-#ifndef DEBUG_GARDNER_INPUT_SCO_PPM
-#define DEBUG_GARDNER_INPUT_SCO_PPM 50.0
-#endif
-            // Debug: inject a fixed sampling-clock offset (SCO) at Gardner input (2 sps stream).
-            // This simulates a constant rhythm error without using the Resampler module.
-            constexpr int kScoOutMax = ReceiverInputBatchIQSamples + 512;
-            alignas(32) float scoChunkI[kScoOutMax];
-            alignas(32) float scoChunkQ[kScoOutMax];
-            int scoOutLen = 0;
-            {
-                static ScoRingBuffer scoRing;
-                static bool scoInit = false;
-                static double tScoAbs = 0.0; // absolute time cursor (input-sample units)
-
-                // Push the current block into the ring.
-                scoRing.PushBlock(filterChunkI, filterChunkQ, ReceiverInputBatchIQSamples);
-
-                // +ppm means "receiver sampling clock is faster": Fs' = Fs*(1+eps).
-                // Evaluate x(t) with step = 1/(1+eps).
-                const double eps = (static_cast<double>(DEBUG_GARDNER_INPUT_SCO_PPM) * 1.0e-6);
-                const double step = 1.0 / (1.0 + eps);
-
-                // Maintain a fixed lookahead margin by staying behind newest data.
-                // This prevents ever hitting interpolation bounds for ppm>0 and ppm<0.
-                const long long latencySamples = static_cast<long long>(ReceiverInputBatchIQSamples) * 64LL;
-                assert(latencySamples + 16 < ScoRingBuffer::kSize);
-                if (!scoInit)
-                {
-                    if (scoRing.absWrite > latencySamples + 4)
-                    {
-                        tScoAbs = static_cast<double>(scoRing.absWrite - latencySamples);
-                        scoInit = true;
-                    }
-                    else
-                    {
-                        scoOutLen = 0;
-                    }
-                }
-                if (scoInit)
-                {
-                    const double newestSafe = static_cast<double>(scoRing.absWrite - 4);
-                    const double oldestSafe = static_cast<double>(scoRing.OldestAbs() + 2);
-
-                    // Strict no-clamp: if out of valid region, re-arm initialization and output 0.
-                    if ((tScoAbs < oldestSafe) || (tScoAbs > newestSafe))
-                    {
-                        scoInit = false;
-                        scoOutLen = 0;
-                    }
-                    else
-                    {
-                        // Choose variable SCO output length so ring occupancy stays around target latency.
-                        const double targetLag = static_cast<double>(latencySamples);
-                        const double desiredTAfter = static_cast<double>(scoRing.absWrite) - targetLag;
-                        const double nOutReal = (desiredTAfter - tScoAbs) / step;
-                        int nOut = static_cast<int>(std::llround(nOutReal));
-                        if (nOut < 0)
-                            nOut = 0;
-
-                        // Hard safety limit from newest available sample.
-                        int nOutByNewest = static_cast<int>(std::floor((newestSafe - tScoAbs) / step)) + 1;
-                        if (nOutByNewest < 0)
-                            nOutByNewest = 0;
-                        nOut = std::min(nOut, nOutByNewest);
-                        nOut = std::min(nOut, kScoOutMax);
-                        scoOutLen = nOut;
-
-                        for (int n = 0; n < scoOutLen; ++n)
-                        {
-                            const double t = tScoAbs;
-                            scoChunkI[n] = scoRing.InterpLagrange4I(t);
-                            scoChunkQ[n] = scoRing.InterpLagrange4Q(t);
-                            tScoAbs += step;
-                        }
-                    }
-                }
-            }
-            const float* gInI = scoChunkI;
-            const float* gInQ = scoChunkQ;
-            const int gInLen = scoOutLen;
-#else
-            const float* gInI = filterChunkI;
-            const float* gInQ = filterChunkQ;
-            const int gInLen = ReceiverInputBatchIQSamples;
-#endif
-#ifdef DEBUG_GARDNER_OUTPUTS
-            if (gInLen > 0)
-            {
-                static FILE* gGardnerInputDump = nullptr;
-                if (!gGardnerInputDump)
-                {
-                    mkdir("../data", 0755);
-                    gGardnerInputDump = std::fopen("../data/gardner_input_iq.bin", "wb");
-                }
-                if (gGardnerInputDump)
-                {
-                    for (int i = 0; i < gInLen; ++i)
-                    {
-                        float iq[2] = {gInI[i], gInQ[i]};
-                        std::fwrite(iq, sizeof(float), 2, gGardnerInputDump);
-                    }
-                    std::fflush(gGardnerInputDump);
-                }
-            }
-#endif
-            int nSym = 0;
-            if (gInLen > 0)
-            {
-                nSym = objGardnerTiming.ProcessBlock(
-                    gInI, gInQ, gInLen,
-                    OneSpsI, OneSpsQ, 2 * ReceiverInputBatchIQSymbols);
-            }
-            // Gate symbols to Viterbi until Gardner is locked.
-            if (!objGardnerTiming.IsLocked())
-            {
-                pendingCount = 0;
-                nSym = 0;
-            }
-            if (nSym > 0)
-            {
-                int copyCount = std::min(nSym, 2 * kSymFrame - pendingCount);
-                std::copy(OneSpsI, OneSpsI + copyCount, pendingI + pendingCount);
-                std::copy(OneSpsQ, OneSpsQ + copyCount, pendingQ + pendingCount);
-                pendingCount += copyCount;
-            }
-#endif
-
-            while ((pendingCount >= kSymFrame) && (!StopAll))
-            {
                 for(int i = 0; i < 3; i++)
                 {
                     std::unique_lock<std::mutex> lk(mtxQueues);
@@ -731,13 +527,6 @@ void Receiver::OperateViterbiManager(void)
                 lkSlots.unlock();
                 CvVitManager2Vit.notify_all();
 
-                pendingCount -= kSymFrame;
-                if (pendingCount > 0)
-                {
-                    std::copy(pendingI + kSymFrame, pendingI + kSymFrame + pendingCount, pendingI);
-                    std::copy(pendingQ + kSymFrame, pendingQ + kSymFrame + pendingCount, pendingQ);
-                }
-            
                 if(StopAll)
                     break;
                 if(!ViterbiSynchronized)
@@ -861,8 +650,8 @@ void Receiver::OperateViterbiManager(void)
                     CvOut2Rx.wait(lkOut, [&] { return StopAll || OutputQ.AvailableWrite(); });
                     if(StopAll)
                         break;
-                    PtrWr = BatchSize3 * static_cast<int>(OutputQ.GetPtrWr());
-                    objDescrambler.Descramble(Merged, OutputAll+PtrWr, BatchSize3);
+                    const int outSlotByte = BatchSize3 * static_cast<int>(OutputQ.GetPtrWr());
+                    objDescrambler.Descramble(Merged, OutputAll + outSlotByte, BatchSize3);
                     OutputQ.AdvanceWrite();
                     lkOut.unlock();
 
@@ -871,9 +660,9 @@ void Receiver::OperateViterbiManager(void)
                         CvRx2Out.notify_one();
                     }
                     else {
-                        // Option A: keep mtxQueues for all access to the slot OutputAll[PtrWr..]
+                        // Option A: keep mtxQueues for all access to the slot OutputAll[outSlotByte..]
                         std::unique_lock<std::mutex> lkOutRead(mtxQueues);
-                        int PtrRdOut = PtrWr;
+                        int PtrRdOut = outSlotByte;
                         if(!PRBSSynchronized)
                         {
                             int PtrStart;
@@ -893,14 +682,7 @@ void Receiver::OperateViterbiManager(void)
                         CvOut2Rx.notify_one();
                     }
                 }
-            }
         }
-        {
-            std::unique_lock<std::mutex> lk(mtxFilterRing);
-            oBufferFilter.AdvancePtrRd(ReceiverInputBatchIQSamples);
-        }
-        CvFilterUser.notify_one();
-
     }
 
 }
