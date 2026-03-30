@@ -29,8 +29,8 @@ void ReceiverResampler::Start(BufferFloat* inRing, std::mutex* inMtx, std::condi
     advance_.store(1.0, std::memory_order_relaxed);
     fifoI_.clear();
     fifoQ_.clear();
-    fifoI_.reserve(static_cast<size_t>(SPB * 8));
-    fifoQ_.reserve(static_cast<size_t>(SPB * 8));
+    fifoI_.reserve(static_cast<size_t>(std::min(kFifoMax, SPB * 64)));
+    fifoQ_.reserve(static_cast<size_t>(std::min(kFifoMax, SPB * 64)));
     fifoRd_ = 0;
     running_ = true;
     thread_ = std::thread(&ReceiverResampler::ThreadMain, this);
@@ -75,17 +75,15 @@ void ReceiverResampler::ThreadMain()
 {
     constexpr int kReadChunk = SPB;
     constexpr int kOutBlockMax = SPB * 2; // worst-case upsampling (Advance=0.5)
+    auto lastFifoFullLog = std::chrono::steady_clock::now();
 
     alignas(32) float outI[kOutBlockMax];
     alignas(32) float outQ[kOutBlockMax];
 
     while (running_ && stopAll_ && !*stopAll_)
     {
-        // 1) Refill internal FIFO from input ring if needed.
+        // 1) Refill internal FIFO from input ring if needed (bounded by kFifoMax → backpressure on inRing_).
         {
-            
-        
-
             std::unique_lock<std::mutex> lk(*inMtx_);
             while (running_ && !*stopAll_ &&
                    (static_cast<int>(fifoI_.size() - fifoRd_) < (kReadChunk + kOverlap)) &&
@@ -98,6 +96,21 @@ void ReceiverResampler::ThreadMain()
 
             while (inRing_->GetSizeInBuffer() >= kReadChunk)
             {
+                const size_t fifoUsed = fifoI_.size() - fifoRd_;
+                if (fifoUsed + static_cast<size_t>(kReadChunk) > static_cast<size_t>(kFifoMax))
+                {
+                    // Backpressure: do not AdvancePtrRd; input ring stays full → filter thread waits on AlmostFull.
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - lastFifoFullLog >= std::chrono::seconds(1))
+                    {
+                        std::cerr << "[ReceiverResampler] Internal FIFO at cap " << fifoUsed << "/" << kFifoMax
+                                  << " samples; pausing drain of input ring (pending "
+                                  << inRing_->GetSizeInBuffer() << " samples in ring)." << std::endl;
+                        lastFifoFullLog = now;
+                    }
+                    break;
+                }
+
                 float* inI = nullptr;
                 float* inQ = nullptr;
                 inRing_->GetReadBuffer(inI, inQ, kReadChunk);
@@ -106,7 +119,6 @@ void ReceiverResampler::ThreadMain()
                 fifoI_.insert(fifoI_.end(), inI, inI + kReadChunk);
                 fifoQ_.insert(fifoQ_.end(), inQ, inQ + kReadChunk);
                 inRing_->AdvancePtrRd(kReadChunk);
-                // Space freed for producer.
                 inCvData_->notify_one();
             }
         }

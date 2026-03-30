@@ -10,6 +10,9 @@
 
 /// Dedicated thread: reads the filtered 2 sps stream, runs timing recovery (Gardner),
 /// and outputs 1 sps symbol frames (kSymFrame = ReceiverInputBatchIQSymbols) to the Viterbi manager.
+///
+/// Backpressure stress test: uncomment #define DEBUG_STRESS_BACKPRESSURE in ReceiverTimingTracking.cpp
+/// (adds an artificial delay each batch: slow consumer → resampler FIFO / filter ring backpressure).
 class ReceiverTimingTracking
 {
 public:

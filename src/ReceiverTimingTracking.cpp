@@ -1,3 +1,6 @@
+// Uncomment to stress backpressure (slow Gardner consumer; expect [ReceiverResampler] FIFO-at-cap logs).
+// #define DEBUG_STRESS_BACKPRESSURE
+
 #include "ReceiverTimingTracking.h"
 #include <algorithm>
 #include <cassert>
@@ -6,6 +9,7 @@
 #include <cstring>
 #include <immintrin.h>
 #include <sys/stat.h>
+#include <thread>
 
 namespace
 {
@@ -150,6 +154,11 @@ void ReceiverTimingTracking::ThreadMain()
             std::memcpy(filterChunkQ, filterOutQ,
                         sizeof(float) * static_cast<size_t>(ReceiverInputBatchIQSamples));
         }
+
+#ifdef DEBUG_STRESS_BACKPRESSURE
+        // Slow consumer: resampler output ring fills → internal FIFO hits kFifoMax → filter blocks on AlmostFull.
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+#endif
 
 #ifdef BYPASS_GARDNER_DUMP_VITERBI_INPUT
         TakeEvenDebug(filterChunkI, oneSpsI_, ReceiverInputBatchIQSamples);
