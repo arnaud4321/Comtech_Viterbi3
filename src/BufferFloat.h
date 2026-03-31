@@ -1,6 +1,7 @@
 #pragma once
 #include "cstdlib"
 #include <algorithm>    // std::copy, std::max
+#include <cassert>
 #include "definitions.h"
 #include <iostream>
 using namespace std;
@@ -13,6 +14,7 @@ private:
     /* data */
     
     int BufferSize;
+    int ExtraBufferSize;
     int GuardSize;
     float *datai = 0, *dataq = 0;
     int PtrWr = 0, PtrRd = 0, Mask;

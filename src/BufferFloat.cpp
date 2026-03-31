@@ -1,5 +1,7 @@
 #include "BufferFloat.h"
-BufferFloat::BufferFloat(int BufferSizeIn, int ExtraBufferSize):BufferSize(BufferSizeIn)
+#include <cstdio>
+BufferFloat::BufferFloat(int BufferSizeIn, int ExtraBufferSizeIn)
+    : BufferSize(BufferSizeIn), ExtraBufferSize(ExtraBufferSizeIn)
 {
     int AllocLen = (BufferSize + ExtraBufferSize);
     datai = (float *)std::aligned_alloc(32,  2*AllocLen* sizeof(datai));
@@ -51,6 +53,15 @@ void BufferFloat::GetReadBuffer(float * &OutI, float * &OutQ, int Size)
             if(PtrEnd > BufferSize)
             {
                 ExtraAtEnd = (PtrEnd - BufferSize) ;
+                if (ExtraAtEnd > ExtraBufferSize)
+                {
+                    std::fprintf(stderr,
+                                 "FATAL: BufferFloat wrapped read exceeds ExtraBufferSize "
+                                 "(ExtraAtEnd=%d, ExtraBufferSize=%d, Size=%d, PtrRd=%d, BufferSize=%d)\n",
+                                 ExtraAtEnd, ExtraBufferSize, Size, PtrRd, BufferSize);
+                    std::abort();
+                }
+                assert(ExtraAtEnd <= ExtraBufferSize && "BufferFloat: ExtraBufferSize too small for wrapped read");
                 std::copy(datai,datai+ExtraAtEnd,datai+BufferSize);
                 std::copy(dataq,dataq+ExtraAtEnd,dataq+BufferSize);
             }
@@ -66,6 +77,16 @@ void BufferFloat::AdvancePtrWr(int Advance)
     {
         if(NewPtrWr > BufferSize)
         {
+            const int overflow = (NewPtrWr - BufferSize);
+            if (overflow > ExtraBufferSize)
+            {
+                std::fprintf(stderr,
+                             "FATAL: BufferFloat wrapped write exceeds ExtraBufferSize "
+                             "(overflow=%d, ExtraBufferSize=%d, Advance=%d, PtrWr=%d, BufferSize=%d)\n",
+                             overflow, ExtraBufferSize, Advance, PtrWr, BufferSize);
+                std::abort();
+            }
+            assert(overflow <= ExtraBufferSize && "BufferFloat: ExtraBufferSize too small for wrapped write");
             std::copy(datai + BufferSize,datai + NewPtrWr,datai);//copy the end to the beggining
             std::copy(dataq + BufferSize,dataq + NewPtrWr,dataq);//copy the end to the beggining
         }
