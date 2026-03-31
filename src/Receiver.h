@@ -18,6 +18,7 @@
 #include "SymbolRateEstimator.h"
 #include "ReceiverResampler.h"
 #include "ReceiverTimingTracking.h"
+#include "ReceiverPhaseTrackingDD.h"
 #include <atomic>
 using namespace std;
 //#define DEBUG1
@@ -73,6 +74,7 @@ private:
     double SymRateMaxRelativeJump = 0.02;
     ReceiverResampler resampler_;
     ReceiverTimingTracking timingTracking_;
+    ReceiverPhaseTrackingDD phaseTrackingDD_;
     Sampler *pSampler;
     BufferFloat oBufferFilter;
     BufferFloat oBufferResampled{SPB*256,32*SPB};

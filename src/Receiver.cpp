@@ -93,6 +93,7 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
                      &CvResampData, &StopAll);
     timingTracking_.ResetGardner(2.0, 1.0e-4, 1.0e-6, 64);
     timingTracking_.Start(&oBufferResampled, &mtxResampRing, &CvResampData, &StopAll);
+    phaseTrackingDD_.Start(&timingTracking_, &StopAll);
 
     FilterThread = std::thread(&Receiver::OperateFilter, this);
     ViterbiManagerThread = std::thread(&Receiver::OperateViterbiManager, this);
@@ -117,6 +118,7 @@ void Receiver::StopThreads(void)
         FilterThread.join();
     resampler_.StopJoin();
     timingTracking_.StopJoin();
+    phaseTrackingDD_.StopJoin();
     for(int i = 0; i < 3;i++)
         CvViterbis2VitManager[i].notify_one();
     for(int i = 0; i < 3;i++)
@@ -471,7 +473,7 @@ void Receiver::OperateViterbiManager(void)
         //true -1 1
         //true 1 1
 
-        if (!timingTracking_.WaitPopSymbolFrame(pendingI, pendingQ, kSymFrame))
+        if (!phaseTrackingDD_.WaitPopSymbolFrame(pendingI, pendingQ, kSymFrame))
             break;
 
         {

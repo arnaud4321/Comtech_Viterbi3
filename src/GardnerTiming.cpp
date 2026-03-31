@@ -278,7 +278,8 @@ void GardnerTiming::PushOmegaHistoryOnUpdate()
         vmax = std::max(vmax, historyOmega_[static_cast<size_t>(i)]);
     }
     const bool prevLocked = locked_;
-    locked_ = (std::abs(vmax - vmin) <= kOmegaLockSpanThreshold);
+    lastOmegaLockSpan_ = std::abs(vmax - vmin);
+    locked_ = (lastOmegaLockSpan_ <= kOmegaLockSpanThreshold);
     // State-change logging is handled at the receiver level so we can print both:
     // - wall-clock simulation time (t_sim)
     // - rate-based time from the sample counters (t_rate)

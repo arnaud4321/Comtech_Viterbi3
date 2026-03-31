@@ -71,7 +71,8 @@ int main(int argc, char* argv[])
 			std::this_thread::sleep_for((std::chrono::duration<double>(1)));
   			auto Now = std::chrono::high_resolution_clock::now();
         	std::chrono::duration<double> elapsed = Now - Start;
-			cout<<"Elapsed Time "<<elapsed.count()<<endl;
+			const double t_rate = static_cast<double>(oRx.NumBitsAll) / SymbolRate;
+			cout<<"Elapsed Time "<<elapsed.count()<<" | t_rate "<<t_rate<<endl;
 			cout<<"EsN0 "<<objParams.EsN0<<" Number of Decoded Bits "<<oRx.NumBitsAll<<" Number of Errors "<<oRx.NumErrorsAll<<endl;
 			cout << "BER " << std::scientific << std::setprecision(6)
 			     << (static_cast<double>(oRx.NumErrorsAll) / static_cast<double>(oRx.NumBitsAll))

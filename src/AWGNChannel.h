@@ -34,13 +34,20 @@ private:
     Transmitter *pTx;
     static constexpr int LengthQueue = 4;
     float *Noise[LengthQueue];
-    thread NoiseThread, OutputThread;
+    thread NoiseThread, OutputThread, FreqOffsetThread;
     ChannelSamplingClockOffset samplingClockOffset_;
     void GenerateNoise(void);
     void GenerateOutput(void);
+    void ApplyFrequencyOffset(void);
     SimpleQueue NoiseQ;
     bool StopAll = false;
     condition_variable CvOutNoise, CvNoiseOut, CvOutUser, CvUserOut;
+    // Queue between OutputThread (noise+gain) and FreqOffsetThread (carrier rotation)
+    std::mutex mtxFreqQ_;
+    std::condition_variable cvFreqQData_;
+    std::condition_variable cvFreqQSpace_;
+    std::deque<std::vector<float>> freqQ_;
+    static constexpr int kFreqQDepth = 4;
     __m256i floats_to_shorts_sat_perm_avx2(__m256 x, __m256 y);
     __m256 mkSig;
     double AccelerationPeriod;

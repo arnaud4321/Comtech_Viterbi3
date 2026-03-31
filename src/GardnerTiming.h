@@ -15,6 +15,10 @@ public:
     int ProcessBlock(const float* inI, const float* inQ, int inLen,
                      float* outI, float* outQ, int outMax);
     bool IsLocked() const { return locked_; }
+    /// Last omega span used for lock decision: |max(historyOmega)-min(historyOmega)|.
+    double GetLastOmegaLockSpan() const { return lastOmegaLockSpan_; }
+    /// Omega span threshold for lock decision.
+    double GetOmegaLockSpanThreshold() const { return kOmegaLockSpanThreshold; }
 
 private:
     void PushToRing(const float* inI, const float* inQ, int inLen);
@@ -55,6 +59,7 @@ private:
     int omegaLockStrideUpdates_ = 1;  // push 1 point every N omega recomputations
     int omegaLockStrideCounter_ = 0;
     bool locked_ = false;
+    double lastOmegaLockSpan_ = 0.0;
 
 #ifdef DEBUG_GARDNER_OUTPUTS
     void OpenDebugFilesIfNeeded();

@@ -222,6 +222,8 @@ void ReceiverTimingTracking::ThreadMain()
             std::cerr << "[GardnerTiming] " << (nowLocked ? "LOCKED" : "UNLOCKED")
                       << " t_sim=" << t_sim << " s"
                       << " t_rate=" << t_rate << " s"
+                      << " omegaSpan=" << gardner_.GetLastOmegaLockSpan()
+                      << " thresh=" << gardner_.GetOmegaLockSpanThreshold()
                       << std::endl;
             prevLocked = nowLocked;
         }

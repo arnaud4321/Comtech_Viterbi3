@@ -1,6 +1,7 @@
 #include "AWGNChannel.h"
 #include "Transmitter.h"
 #include <cstring>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 extern bool Finish;
@@ -83,8 +84,14 @@ void AWGNChannel::StartThreads(void)
     samplingClockOffset_.Configure(totalPpm);
     samplingClockOffset_.Start(&OutputBuffer, &mtxOutputBuffer_, &CvUserOut, &CvOutUser, &StopAll);
 
+    // Carrier frequency offset (Hz) applied on complex baseband after noise+gain, before sampling-clock offset.
+    // Uses FrequencyShift from config.json.
+    objFreqOffset.SetSamplingFrequency(SamplingFrequency);
+    objFreqOffset.SetFrequency(static_cast<Ipp64f>(pParams->FrequencyShift));
+
     NoiseThread = std::thread(&AWGNChannel::GenerateNoise, this);
     OutputThread = std::thread(&AWGNChannel::GenerateOutput, this);
+    FreqOffsetThread = std::thread(&AWGNChannel::ApplyFrequencyOffset, this);
 }
 
 
@@ -96,10 +103,14 @@ void AWGNChannel::StopThreads(void)
     CvOutUser.notify_one();
     CvNoiseOut.notify_one();
     CvUserOut.notify_one();
+    cvFreqQData_.notify_one();
+    cvFreqQSpace_.notify_one();
     if(NoiseThread.joinable())
         NoiseThread.join();
     if(OutputThread.joinable())
         OutputThread.join();
+    if(FreqOffsetThread.joinable())
+        FreqOffsetThread.join();
     samplingClockOffset_.StopJoin();
 }
 
@@ -148,19 +159,18 @@ void AWGNChannel::GenerateOutput(void)
    
     while(!StopAll)
     {
-        {
-            std::unique_lock<std::mutex> lk(mtxNoiseQ_);
-            CvNoiseOut.wait(lk, [&] { return StopAll || NoiseQ.AvailableRead(); });
-        }
-
-        if(StopAll)
-            break;
         std::unique_lock<std::mutex> lkNoise(mtxNoiseQ_);
+        CvNoiseOut.wait(lkNoise, [&] { return StopAll || NoiseQ.AvailableRead(); });
+        if (StopAll)
+            break;
         unsigned int PtrRdNoise = NoiseQ.GetPtrRd();
 
         alignas(32) float noisyChunk[TxOutputBatchSize];
         if (!pTx->CopyOutputSamples(noisyChunk, TxOutputBatchSize, StopAll))
+        {
+            lkNoise.unlock();
             break;
+        }
 
         {
             __m256 mStdn = _mm256_set1_ps(Stdn);
@@ -214,11 +224,63 @@ void AWGNChannel::GenerateOutput(void)
         }
 #endif
 
-        samplingClockOffset_.EnqueueNoisyInterleaved(noisyChunk, TxOutputBatchSize);
+        // Hand-off to dedicated frequency-offset thread.
+        {
+            std::unique_lock<std::mutex> lk(mtxFreqQ_);
+            cvFreqQSpace_.wait(lk, [&] { return StopAll || static_cast<int>(freqQ_.size()) < kFreqQDepth; });
+            if (StopAll)
+            {
+                lkNoise.unlock();
+                break;
+            }
+            std::vector<float> v(static_cast<size_t>(TxOutputBatchSize));
+            std::copy(noisyChunk, noisyChunk + TxOutputBatchSize, v.begin());
+            freqQ_.push_back(std::move(v));
+        }
+        cvFreqQData_.notify_one();
 
         NoiseQ.AdvanceRead();
         lkNoise.unlock();
         CvOutNoise.notify_one();
+    }
+}
+
+void AWGNChannel::ApplyFrequencyOffset(void)
+{
+    const unsigned int nComplex = static_cast<unsigned int>(TxOutputBatchSize / 2);
+    std::vector<float> iBuf(nComplex);
+    std::vector<float> qBuf(nComplex);
+    std::vector<float> interleaved;
+
+    while (!StopAll)
+    {
+        {
+            std::unique_lock<std::mutex> lk(mtxFreqQ_);
+            cvFreqQData_.wait(lk, [&] { return StopAll || !freqQ_.empty(); });
+            if (StopAll)
+                break;
+            interleaved = std::move(freqQ_.front());
+            freqQ_.pop_front();
+            lk.unlock();
+            cvFreqQSpace_.notify_one();
+        }
+
+        if (interleaved.size() != static_cast<size_t>(TxOutputBatchSize))
+            continue;
+
+        for (unsigned int k = 0; k < nComplex; ++k)
+        {
+            iBuf[k] = interleaved[2 * k];
+            qBuf[k] = interleaved[2 * k + 1];
+        }
+        objFreqOffset.CreateOutputs(iBuf.data(), qBuf.data(), nComplex);
+        for (unsigned int k = 0; k < nComplex; ++k)
+        {
+            interleaved[2 * k] = iBuf[k];
+            interleaved[2 * k + 1] = qBuf[k];
+        }
+
+        samplingClockOffset_.EnqueueNoisyInterleaved(interleaved.data(), TxOutputBatchSize);
     }
 }
 
