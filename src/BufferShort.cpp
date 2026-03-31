@@ -1,7 +1,8 @@
 #include "BufferShort.h"
-BufferShort::BufferShort(int BufferSizeIn, int ExtraBufferSize):BufferSize(BufferSizeIn)
+BufferShort::BufferShort(int BufferSizeIn, int ExtraBufferSizeIn)
+    : BufferSize(BufferSizeIn), ExtraBufferSize(ExtraBufferSizeIn)
 {
-    data = (short*) _mm_malloc( (BufferSize + ExtraBufferSize) * sizeof(short),32);
+    data = (short*) _mm_malloc((BufferSize + ExtraBufferSize) * sizeof(short), 32);
     Mask = BufferSize - 1;
     GuardSize = BufferSize - (BufferSize>>3);
 }
@@ -42,6 +43,15 @@ short * BufferShort::GetReadBuffer(int Size)
         if(PtrEnd > BufferSize) 
         {
             ExtraAtEnd = PtrEnd - BufferSize;
+            if (ExtraAtEnd > ExtraBufferSize)
+            {
+                std::fprintf(stderr,
+                             "FATAL: BufferShort wrapped read exceeds ExtraBufferSize "
+                             "(ExtraAtEnd=%d, ExtraBufferSize=%d, Size=%d, PtrRd=%d, BufferSize=%d)\n",
+                             ExtraAtEnd, ExtraBufferSize, Size, PtrRd, BufferSize);
+                std::abort();
+            }
+            assert(ExtraAtEnd <= ExtraBufferSize && "BufferShort: ExtraBufferSize too small for wrapped read");
             std::copy(data,data+ExtraAtEnd,data+BufferSize);
         } 
     }
@@ -55,7 +65,19 @@ void BufferShort::AdvancePtrWr(int Advance)
     if((NewPtrWr) >= BufferSize)
     {
         if(NewPtrWr > BufferSize)
-            std::copy(data + BufferSize,data + NewPtrWr,data);//copy the end to the beggining
+        {
+            const int overflow = (NewPtrWr - BufferSize);
+            if (overflow > ExtraBufferSize)
+            {
+                std::fprintf(stderr,
+                             "FATAL: BufferShort wrapped write exceeds ExtraBufferSize "
+                             "(overflow=%d, ExtraBufferSize=%d, Advance=%d, PtrWr=%d, BufferSize=%d)\n",
+                             overflow, ExtraBufferSize, Advance, PtrWr, BufferSize);
+                std::abort();
+            }
+            assert(overflow <= ExtraBufferSize && "BufferShort: ExtraBufferSize too small for wrapped write");
+            std::copy(data + BufferSize, data + NewPtrWr, data);//copy the end to the beggining
+        }
         NewPtrWr -= BufferSize;
     }    
     PtrWr = NewPtrWr;

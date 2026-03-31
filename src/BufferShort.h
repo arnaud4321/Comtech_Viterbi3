@@ -1,6 +1,8 @@
 #pragma once
 #include "cstdlib"
 #include <algorithm>    // std::copy
+#include <cassert>
+#include <cstdio>
 #include "definitions.h"
 #include <immintrin.h>
 #include <iostream>
@@ -12,6 +14,7 @@ private:
     /* data */
     
     int BufferSize;
+    int ExtraBufferSize;
     int GuardSize;
     short *data = 0;
     int PtrWr = 0, PtrRd = 0, Mask;

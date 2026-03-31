@@ -128,17 +128,12 @@ void AWGNChannel::GenerateNoise(void)
     #endif
     while(!StopAll)
     {
-        {
-            std::unique_lock<std::mutex> lk(mtxNoiseQ_);
-            CvOutNoise.wait(lk, [&] { return StopAll || NoiseQ.AvailableWrite(); });
-        }
-
-        
-        if(StopAll)
-            break;
         std::unique_lock<std::mutex> lk(mtxNoiseQ_);
-        unsigned int PtrWr = NoiseQ.GetPtrWr();
-        oNoiseGen.randn(Noise[PtrWr],NoiseBatchSize);
+        CvOutNoise.wait(lk, [&] { return StopAll || NoiseQ.AvailableWrite(); });
+        if (StopAll)
+            break;
+        const unsigned int PtrWr = NoiseQ.GetPtrWr();
+        oNoiseGen.randn(Noise[PtrWr], NoiseBatchSize);
         NoiseQ.AdvanceWrite();
         lk.unlock();
         CvNoiseOut.notify_one();
@@ -159,18 +154,18 @@ void AWGNChannel::GenerateOutput(void)
    
     while(!StopAll)
     {
-        std::unique_lock<std::mutex> lkNoise(mtxNoiseQ_);
-        CvNoiseOut.wait(lkNoise, [&] { return StopAll || NoiseQ.AvailableRead(); });
-        if (StopAll)
-            break;
-        unsigned int PtrRdNoise = NoiseQ.GetPtrRd();
+        unsigned int PtrRdNoise = 0;
+        {
+            std::unique_lock<std::mutex> lkNoise(mtxNoiseQ_);
+            CvNoiseOut.wait(lkNoise, [&] { return StopAll || NoiseQ.AvailableRead(); });
+            if (StopAll)
+                break;
+            PtrRdNoise = NoiseQ.GetPtrRd();
+        }
 
         alignas(32) float noisyChunk[TxOutputBatchSize];
         if (!pTx->CopyOutputSamples(noisyChunk, TxOutputBatchSize, StopAll))
-        {
-            lkNoise.unlock();
             break;
-        }
 
         {
             __m256 mStdn = _mm256_set1_ps(Stdn);
@@ -229,18 +224,17 @@ void AWGNChannel::GenerateOutput(void)
             std::unique_lock<std::mutex> lk(mtxFreqQ_);
             cvFreqQSpace_.wait(lk, [&] { return StopAll || static_cast<int>(freqQ_.size()) < kFreqQDepth; });
             if (StopAll)
-            {
-                lkNoise.unlock();
                 break;
-            }
             std::vector<float> v(static_cast<size_t>(TxOutputBatchSize));
             std::copy(noisyChunk, noisyChunk + TxOutputBatchSize, v.begin());
             freqQ_.push_back(std::move(v));
         }
         cvFreqQData_.notify_one();
 
-        NoiseQ.AdvanceRead();
-        lkNoise.unlock();
+        {
+            std::unique_lock<std::mutex> lkNoise(mtxNoiseQ_);
+            NoiseQ.AdvanceRead();
+        }
         CvOutNoise.notify_one();
     }
 }

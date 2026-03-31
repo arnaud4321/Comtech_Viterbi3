@@ -1,7 +1,10 @@
 #include "SimpleQueue.h"
+#include <cassert>
 SimpleQueue::SimpleQueue(int LengthIn)
 {
     Length = LengthIn;
+    // Required because Ptr wrap uses '& Mask' (bitmask wrap).
+    assert(Length > 0 && (Length & (Length - 1)) == 0 && "SimpleQueue length must be a power of two");
     Mask = Length - 1;
     Available = new bool [Length];
     for(int i = 0; i < Length; i++)
