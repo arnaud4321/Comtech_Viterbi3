@@ -1,5 +1,13 @@
-// Comtech_Viterbi_3_Utilities.cpp : This file contains the 'main' function. Program execution begins and ends there.
-//
+/**
+ * @file main.cpp
+ * @brief Program entry: JSON config, start TX / channel / sampler / RX, wait for @c Finish, join threads.
+ *
+ * @details Typical flow: @ref Params::ReadParams, construct @ref Transmitter / @ref AWGNChannel / @ref Sampler /
+ * @ref Receiver, wire pointers (@c SetTransmitter, @c SetChannel, @c SetSampler), @c StartThreads on each block
+ * with rolloff and RX options from JSON. Main thread loop advances TX output, optionally drains @c Receiver
+ * output for FILE mode, prints periodic status until @c Finish. Stops child threads in reverse dependency order
+ * (RX → sampler → channel → TX).
+ */
 
 #include "definitions.h"
 #include <iomanip>
@@ -8,6 +16,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <atomic>
 using namespace std;
 #include "Params.h"
 #include "Transmitter.h"
@@ -16,9 +25,16 @@ using namespace std;
 #include "Sampler.h"
 using namespace std;
 
-bool Finish = false;
+std::atomic<bool> Finish{false};
 
 mutex mtxfilethr;
+
+/**
+ * @brief Loads config, starts TX/channel/sampler/RX threads, runs until @c Finish or FILE_TX drain.
+ * @param argc Argument count (expects @c 2: program name + path to JSON config).
+ * @param argv @a argv[1] = configuration file path.
+ * @return 0 on normal shutdown, -1 if config path missing.
+ */
 int main(int argc, char* argv[])
 {
 	if(argc != 2)
@@ -44,11 +60,19 @@ int main(int argc, char* argv[])
 	oAWGN.SetParameters(&objParams);
 	oAWGN.StartThreads();
 	Sampler objSampler(objParams.Debug);
+	{
+		// Match RX filter: 1 s rollup when DisplayPeriodSec<=0 (avoid coupling to small Constellation PeriodSec).
+		const double tpm =
+		    (objParams.DisplayPeriodSec > 0.0) ? objParams.DisplayPeriodSec : 1.0;
+		objSampler.SetThroughputMeasurePeriodSec(tpm);
+	}
+	objSampler.SetDisplayPeriodSec(objParams.DisplayPeriodSec);
 	objSampler.SetChannel(&oAWGN);
 	objSampler.StartThread();
 	Receiver oRx;
 	oRx.SetSampler(&objSampler);
-	oRx.StartThreads(objParams.RollOff, objParams.TxMode, objParams.SymRateCfg);
+	oRx.SetChannel(&oAWGN);
+	oRx.StartThreads(objParams.RollOff, objParams.TxMode, objParams.SymRateCfg, objParams.DisplayPeriodSec, objParams.CentralFreqCfg, objParams.ConstellationCfg);
 	
 	auto Start = std::chrono::high_resolution_clock::now();
 
@@ -65,21 +89,34 @@ int main(int argc, char* argv[])
 	}
 	else
 	{
-		int n = 0;
-		while(1)
+		while(!Finish.load(std::memory_order_relaxed))
 		{
-			std::this_thread::sleep_for((std::chrono::duration<double>(1)));
-  			auto Now = std::chrono::high_resolution_clock::now();
-        	std::chrono::duration<double> elapsed = Now - Start;
+			// DisplayPeriodSec <= 0: no periodic [Main] line; sleep to avoid busy-wait.
+			const double dps = objParams.DisplayPeriodSec;
+			const double sleepSec = (dps > 0.0) ? dps : 1.0;
+			std::this_thread::sleep_for(std::chrono::duration<double>(sleepSec));
+			if (dps <= 0.0)
+				continue;
+			auto Now = std::chrono::high_resolution_clock::now();
+			std::chrono::duration<double> elapsed = Now - Start;
 			const double t_rate = static_cast<double>(oRx.NumBitsAll) / SymbolRate;
-			cout<<"Elapsed Time "<<elapsed.count()<<" | t_rate "<<t_rate<<endl;
-			cout<<"EsN0 "<<objParams.EsN0<<" Number of Decoded Bits "<<oRx.NumBitsAll<<" Number of Errors "<<oRx.NumErrorsAll<<endl;
-			cout << "BER " << std::scientific << std::setprecision(6)
-			     << (static_cast<double>(oRx.NumErrorsAll) / static_cast<double>(oRx.NumBitsAll))
-			     << std::defaultfloat << endl;
+			cout << std::fixed << std::setprecision(6)
+			     << "[Main] t_sim=" << elapsed.count() << " s"
+			     << " t_rate=" << t_rate << " s"
+			     << " EsN0=" << objParams.EsN0
+			     << " bits=" << oRx.NumBitsAll
+			     << " errors=" << oRx.NumErrorsAll
+			     << " BER=" << std::scientific << std::setprecision(6)
+			     << (static_cast<double>(oRx.NumErrorsAll) / std::max(1.0, static_cast<double>(oRx.NumBitsAll)))
+			     << std::defaultfloat
+			     << endl;
 			#ifdef DEBUG_STATISTICS
-			cout<<"Average Metrics Growth "<<oRx.CurrDebugStatistics.MeanMetricsGrowth<<endl;
-			cout<<"Max Metrics Growth "<<oRx.CurrDebugStatistics.MaxMetricsGrowth<<endl;
+			cout << std::fixed << std::setprecision(6)
+			     << "[Viterbi] mean_metrics_growth=" << oRx.CurrDebugStatistics.MeanMetricsGrowth
+			     << " max_metrics_growth=" << oRx.CurrDebugStatistics.MaxMetricsGrowth
+			     << " t_sim=" << elapsed.count() << " s"
+			     << " t_rate=" << t_rate << " s"
+			     << endl;
 
 			#endif
 		}

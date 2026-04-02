@@ -1,3 +1,6 @@
+/** @file Params.cpp
+ *  @brief JSON configuration loader for @ref Params.
+ */
 #include "Params.h"
 #include "json.hpp"
 #include <fstream>
@@ -25,6 +28,11 @@ void Params::ReadParams(string FileName)
 
     TxFileName = j["Transmitter"]["FileName"];
 	EsN0 = j["Channel"]["Esn0"];
+    // Channel gain profile (dB). Backward-compatible with older key InitialRangeDb.
+    InitialGainDb = j["Channel"].value("InitialGainDb", j["Channel"].value("InitialRangeDb", 0.0));
+    // Keep name "DynamicRangeDb": it is a dB span applied over the ramp segments.
+    DynamicRangeDb = j["Channel"].value("DynamicRangeDb", 0.0);
+    InitialFrequencyShift = j["Channel"].value("InitialFrequencyShift", 0.0);
     FrequencyShift = j["Channel"]["FrequencyShift"];
     ClockMismatchPpm = j["Channel"].value("ClockMismatchPpm", 0.0);
     CarrierToSymbolRateRatio = j["Channel"].value("CarrierToSymbolRateRatio", 935.0);
@@ -55,6 +63,24 @@ void Params::ReadParams(string FileName)
     else
         Debug = true;
 
+    DisplayPeriodSec = j["Simulation"].value("DisplayPeriodSec", 1.0);
+    // > 0: periodic status interval (s). <= 0: no periodic logs; lock/unlock (and similar) events only.
+
+    if (j.contains("CentralFrequency"))
+    {
+        const auto& c = j["CentralFrequency"];
+        CentralFreqCfg.Enable = c.value("Enable", 1) != 0;
+        CentralFreqCfg.EstimationBlockSamples = c.value("EstimationBlockSamples", 65536);
+        CentralFreqCfg.EstimatePeriodSec = c.value("EstimatePeriodSec", 1.0);
+        CentralFreqCfg.Estimator.MaxOffsetHz = c.value("MaxOffsetHz", 200000.0);
+        CentralFreqCfg.Estimator.PeakToMedianThreshold = c.value("PeakToMedianThreshold", 8.0);
+        CentralFreqCfg.Estimator.FftSizeMultiplier = c.value("FftSizeMultiplier", 4);
+        CentralFreqCfg.NcoHzEmaAlpha = c.value("NcoHzEmaAlpha", 0.2);
+        CentralFreqCfg.MaxHzSlewRate = c.value("MaxHzSlewRate", 8000.0);
+        CentralFreqCfg.PowerEmaAlpha = c.value("PowerEmaAlpha", 0.01);
+        CentralFreqCfg.TargetAvgPower = c.value("TargetAvgPower", -1.0);
+    }
+
     if (j.contains("SymbolRateEstimator"))
     {
         const auto& s = j["SymbolRateEstimator"];
@@ -63,6 +89,24 @@ void Params::ReadParams(string FileName)
         if (s.contains("EstimatePeriodSec")) SymRateCfg.EstimatePeriodSec = s["EstimatePeriodSec"];
         if (s.contains("PeakToMedianThreshold")) SymRateCfg.PeakToMedianThreshold = s["PeakToMedianThreshold"];
         if (s.contains("MaxRelativeJump")) SymRateCfg.MaxRelativeJump = s["MaxRelativeJump"];
+    }
+
+    if (j.contains("ConstellationDisplay"))
+    {
+        const auto& c = j["ConstellationDisplay"];
+        ConstellationCfg.PeriodSec = c.value("PeriodSec", 0.0);
+        ConstellationCfg.DrawPeriodSec = c.value("DrawPeriodSec", 0.0);
+        ConstellationCfg.NumSymbols = c.value("NumSymbols", 2048);
+        ConstellationCfg.MaxAbs = c.value("MaxAbs", 2.0);
+        ConstellationCfg.Backend = c.value("Backend", std::string("matplotlib"));
+        ConstellationCfg.PythonExe = c.value("PythonExe", std::string("python3"));
+        ConstellationCfg.PythonScript = c.value("PythonScript", std::string("src/constellation_display.py"));
+        ConstellationCfg.XDisplay = c.value("XDisplay", std::string(""));
+        ConstellationCfg.Width = c.value("Width", 61);
+        ConstellationCfg.Height = c.value("Height", 31);
+        ConstellationCfg.ClearScreen = c.value("ClearScreen", 0) != 0;
+        if (ConstellationCfg.NumSymbols <= 0)
+            ConstellationCfg.NumSymbols = 2048;
     }
 
 }

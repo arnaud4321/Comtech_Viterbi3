@@ -1,3 +1,13 @@
+/**
+ * @file ReceiverTimingTracking.cpp
+ * @brief Thread: read 2 sps ring → @ref GardnerTiming::ProcessBlock → queue 1 sps frames for phase DD / Viterbi.
+ *
+ * @details **ThreadMain** — Under mutex, waits for @c SPB complex pairs on @c pFilterBuf_, appends to
+ * @c pendingI_/Q_, runs Gardner until a full @c kSymFrame can be pushed to @c framePool_ queue
+ * (@c pushOneFrameToQueue). @c WaitPopSymbolFrame blocks consumers on @c cvFrameReady_. Optional
+ * @c DEBUG_STRESS_BACKPRESSURE adds sleep to stress upstream FIFOs.
+ */
+
 // Uncomment to stress backpressure (slow Gardner consumer; expect [ReceiverResampler] FIFO-at-cap logs).
 // #define DEBUG_STRESS_BACKPRESSURE
 
@@ -48,13 +58,15 @@ void ReceiverTimingTracking::ResetGardner(double nominalRatio, double kp, double
 }
 
 void ReceiverTimingTracking::Start(BufferFloat* filterRing, std::mutex* mtxFilterRing,
-                                   std::condition_variable* cvFilterData, bool* stopAll)
+                                   std::condition_variable* cvFilterData, bool* stopAll,
+                                   double displayPeriodSec)
 {
     StopJoin();
     pFilterBuf_ = filterRing;
     pMtxFilter_ = mtxFilterRing;
     pCvFilterData_ = cvFilterData;
     pStopAll_ = stopAll;
+    displayPeriodSec_ = displayPeriodSec;
     pendingCount_ = 0;
     frameQHead_ = 0;
     frameQTail_ = 0;
@@ -122,6 +134,9 @@ bool ReceiverTimingTracking::pushOneFrameToQueue(const float* i, const float* q)
     return true;
 }
 
+/**
+ * @brief Gardner input pump and framed 1 sps output queue.
+ */
 void ReceiverTimingTracking::ThreadMain()
 {
     alignas(32) float filterChunkI[ReceiverInputBatchIQSamples];
@@ -129,6 +144,7 @@ void ReceiverTimingTracking::ThreadMain()
     uint64_t samples_total = 0;
     const auto wall_start = std::chrono::steady_clock::now();
     bool prevLocked = false;
+    auto lastStatusDisplay = wall_start;
 
     while (threadRunning_ && (pStopAll_ == nullptr || !*pStopAll_))
     {
@@ -219,13 +235,33 @@ void ReceiverTimingTracking::ThreadMain()
             const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
             const double t_sim =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-            std::cerr << "[GardnerTiming] " << (nowLocked ? "LOCKED" : "UNLOCKED")
-                      << " t_sim=" << t_sim << " s"
-                      << " t_rate=" << t_rate << " s"
+            std::cout << "[GardnerTiming] "
+                      << (nowLocked ? "\033[32mLOCKED\033[0m" : "\033[31mUNLOCKED\033[0m")
                       << " omegaSpan=" << gardner_.GetLastOmegaLockSpan()
                       << " thresh=" << gardner_.GetOmegaLockSpanThreshold()
+                      << " t_sim=" << t_sim << " s"
+                      << " t_rate=" << t_rate << " s"
                       << std::endl;
             prevLocked = nowLocked;
+        }
+
+        // Periodic status line (once per second) to see lock-related values without waiting for transitions.
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (displayPeriodSec_ > 0.0 &&
+                now - lastStatusDisplay >= std::chrono::duration<double>(displayPeriodSec_))
+            {
+                const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
+                const double t_sim = std::chrono::duration<double>(now - wall_start).count();
+                std::cout << "[GardnerTiming] status"
+                          << " locked=" << (nowLocked ? 1 : 0)
+                          << " omegaSpan=" << gardner_.GetLastOmegaLockSpan()
+                          << " thresh=" << gardner_.GetOmegaLockSpanThreshold()
+                          << " t_sim=" << t_sim << " s"
+                          << " t_rate=" << t_rate << " s"
+                          << std::endl;
+                lastStatusDisplay = now;
+            }
         }
         if (!gardner_.IsLocked())
         {

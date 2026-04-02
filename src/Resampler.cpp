@@ -1,3 +1,13 @@
+/**
+ * @file Resampler.cpp
+ * @brief Precomputes cubic Lagrange weights over @c LagrangeTableLength phases; @c CreateOutputs steps accumulator.
+ *
+ * @details **CreateOutputs** — For each output sample, maps fractional phase to table index, loads four
+ * Lagrange coefficients, forms weighted sum of four consecutive input samples on I and Q; advances @c Start and
+ * @c Frac using fixed-point @c Accumulator and @c Advance (input samples consumed per output). Returns count
+ * of outputs written (0 if @c Advance < 0.5).
+ */
+
 #include "Resampler.h"
 
 
@@ -49,6 +59,9 @@ void Resampler::CreateObjects()
 
 
 
+/**
+ * @brief Generate up to @a outMax resampled complex outputs; updates @a Start / @a Frac for continuity.
+ */
 unsigned int Resampler::CreateOutputs(const float *InI, const float *InQ,
                                       float *OutputI, float *OutputQ,
                                       double Advance, unsigned int &Start, double &Frac,

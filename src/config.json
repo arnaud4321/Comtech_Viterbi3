@@ -6,25 +6,54 @@
     "FileName": ""
   },
   "Channel": {
-    "Esn0": 20,
-    "FrequencyShift": 23333,
-    "ClockMismatchPpm": -1000,
-    "CarrierToSymbolRateRatio": 935,
-    "AccelerationPeriod":40,
-    "StablePeriod":120
+    "Esn0": 10,
+    "InitialGainDb": -10,
+    "DynamicRangeDb": -30,
+    "InitialFrequencyShift": 200000,
+    "FrequencyShift": 50000,
+    "ClockMismatchPpm": 1000,
+    "CarrierToSymbolRateRatio": 100,
+    "AccelerationPeriod":10,
+    "StablePeriod":10
   },
   
   "Simulation": {
     "Method":0,
     "NumErrors": 1000,
     "Seed": 132345,
-    "Debug":0
+    "Debug":0,
+    "DisplayPeriodSec": 1.0
+  },
+  "CentralFrequency": {
+    "Enable": 1,
+    "EstimationBlockSamples": 65536,
+    "EstimatePeriodSec": 1.0,
+    "MaxOffsetHz": 2000000,
+    "PeakToMedianThreshold": 8.0,
+    "FftSizeMultiplier": 4,
+    "NcoHzEmaAlpha": 0.4,
+    "MaxHzSlewRate": 50000.0,
+    "PowerEmaAlpha": 0.01,
+    "TargetAvgPower": 1.0
+  },
+  "ConstellationDisplay": {
+    "PeriodSec": 0.5,
+    "DrawPeriodSec": 0.5,
+    "NumSymbols": 2048,
+    "MaxAbs": 2.0,
+    "Backend": "matplotlib",
+    "PythonExe": "python3",
+    "PythonScript": "src/constellation_display.py",
+    "XDisplay": ":1",
+    "Width": 61,
+    "Height": 31,
+    "ClearScreen": 0
   },
   "SymbolRateEstimator": {
     "FftSize": 131072,
     "MaxOffsetHz": 200000,
     "EstimatePeriodSec": 1.0,
-    "PeakToMedianThreshold": 8.0,
+    "PeakToMedianThreshold": 100.0,
     "MaxRelativeJump": 0.02
   }
 }

@@ -1,4 +1,35 @@
+/**
+ * @file Receiver.cpp
+ * @brief Receive chain: filter thread, symbol-rate estimate, resampler, NCO/AGC, Gardner, phase DD, three Viterbi, output.
+ *
+ * @details **Startup (@c StartThreads)** — Configures @ref RxFilter, @ref SymbolRateEstimator, optional
+ * @ref ConstellationDisplay; starts @ref ReceiverResampler on @c oBufferFilter → @c oBufferResampled;
+ * @ref ReceiverFreqCorrector on resampled → @c oBufferFreqCorrected; @ref ReceiverTimingTracking on that ring;
+ * @ref ReceiverPhaseTrackingDD fed by timing; then **FilterThread** (@c OperateFilter), **ViterbiManagerThread**
+ * (@c OperateViterbiManager), three **OperateViterbi** workers.
+ *
+ * **OperateFilter** — @ref Sampler::ReadFilterBatch → AVX shorts-to-float → @ref RxFilter → @c oBufferFilter
+ * write window (@c SPB pairs). Until @c SymbolRateDetected, @c AdvancePtrWr is skipped: @ref SymbolRateEstimator
+ * still receives filter output during timed collection windows when Gardner is **not** locked; the resampler
+ * does not consume. On first acceptance, @c SymbolRateEstimateHz and @c ReceiverResampler::UpdateFromSymbolRateHz;
+ * then each batch advances the ring by @c SPB (with catch-up @c AdvancePtrWr if detection flipped mid-pass).
+ * Optional smoothed re-estimates when not locked. Notifies @c CvFilterUser / @c CvResampData; throughput and
+ * constellation hooks as implemented.
+ *
+ * **OperateViterbi** (×3) — Waits on @c DemodulatorQ[i]. If not yet synchronized, runs four metric probes
+ * (IQ swap/sign combinations) into @c VitSyncResults; else decodes with locked @c ViterbiParams, differential
+ * decode into @c DecodedQ[i].
+ *
+ * **OperateViterbiManager** — @c WaitPopSymbolFrame from phase DD; @c Split3 to three alignments; enqueue
+ * @c DemodulatorQ; collects sync metrics, picks best hypothesis, merges bytes, PRBS sync, descramble,
+ * @c OutputQ. Optional constellation @c UpdateEx and periodic status.
+ *
+ * **StopThreads** — Join order: filter → @c resampler_ → @c freqCorrector_ → @c timingTracking_ →
+ * @c phaseTrackingDD_ → three Viterbi workers → manager (releases constellation child).
+ */
+
 #include "Receiver.h"
+#include "AWGNChannel.h"
 #include <chrono>
 #include <iostream>
 #include <algorithm>
@@ -9,6 +40,9 @@
 #include <sys/stat.h>
 
 extern std::mutex mtxfilethr;
+
+// Forward declaration: used in OperateViterbiManager before the definition further below.
+static void InjectPRBSErrorDeterministic(unsigned char* buf, int length);
 
 Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB),OutputQ(LengthQueue)
 {
@@ -65,10 +99,41 @@ Receiver::~Receiver()
 
 }
 void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
-                            const SymbolRateEstimatorConfig& symRateCfg)
+                            const SymbolRateEstimatorConfig& symRateCfg,
+                            double displayPeriodSec,
+                            const ReceiverFreqCorrectorConfig& centralFreqCfg,
+                            const ConstellationDisplayConfig& constellationCfg)
 {
     StopAll = false;
     RxMode = RxModeIn;
+    displayPeriodSec_ = displayPeriodSec;
+    constellationCfg_ = constellationCfg;
+    // Keep measure cadence at >= 1 s when console is off: short PeriodSec (e.g. 0.5) was tied here and
+    // differed from DisplayPeriodSec==1 runs (see sampler tpm in main.cpp too).
+    rxThroughputMeasurePeriodSec_ =
+        (displayPeriodSec > 0.0) ? displayPeriodSec : 1.0;
+    constellationDisplay_.reset();
+    if (constellationCfg_.PeriodSec > 0.0 && constellationCfg_.Backend == "matplotlib")
+    {
+        constellationDisplay_ = std::make_unique<ConstellationDisplay>();
+        if (!constellationDisplay_->Start(constellationCfg_))
+        {
+            std::cout << "[Constellation] \033[31mDisabled\033[0m (failed to start backend)"
+                      << " (Backend=" << constellationCfg_.Backend << ")"
+                      << std::endl;
+            constellationDisplay_.reset();
+        }
+        else
+        {
+            std::cout << "[Constellation] \033[32mEnabled\033[0m"
+                      << " backend=" << constellationCfg_.Backend
+                      << " period=" << constellationCfg_.PeriodSec << " s"
+                      << " N=" << constellationCfg_.NumSymbols
+                      << " XDisplay=" << (constellationCfg_.XDisplay.empty() ? "(inherit)" : constellationCfg_.XDisplay)
+                      << " pid=" << (constellationDisplay_ ? constellationDisplay_->GetChildPid() : -1)
+                      << std::endl;
+        }
+    }
     oBufferFilter.Reset();
     objRxFilter.CreateObjects(RollOff);
     ViterbiSynchronized = false;
@@ -81,19 +146,29 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
     SymRatePeakToMedianThreshold = symRateCfg.PeakToMedianThreshold;
     SymRateMaxRelativeJump = symRateCfg.MaxRelativeJump;
     SymRateEstimatePeriodSec = std::max(0.01, symRateCfg.EstimatePeriodSec);
-    objSymRateEstimator.Reset(SamplingFrequency, symRateCfg.FftSize, symRateCfg.MaxOffsetHz);
+    objSymRateEstimator.Reset(SamplingFrequency,
+                              symRateCfg.FftSize,
+                              symRateCfg.MaxOffsetHz,
+                              symRateCfg.PeakToMedianThreshold);
     SymRateWindowBatches = objSymRateEstimator.GetRequiredBatches(SPB);
     SymRateBatchCounter = 0;
     SymRateAcceptedCount = 0;
     SymbolRateDetected.store(false, std::memory_order_relaxed);
     SymbolRateEstimateHz.store(0.0, std::memory_order_relaxed);
     oBufferResampled.Reset();
+    oBufferFreqCorrected.Reset();
     resampler_.Start(&oBufferFilter, &mtxFilterRing, &CvFilterUser,
                      &oBufferResampled, &mtxResampRing, &CvResampData,
                      &CvResampData, &StopAll);
+    freqCorrector_.Configure(centralFreqCfg, displayPeriodSec);
     timingTracking_.ResetGardner(2.0, 1.0e-4, 1.0e-6, 64);
-    timingTracking_.Start(&oBufferResampled, &mtxResampRing, &CvResampData, &StopAll);
-    phaseTrackingDD_.Start(&timingTracking_, &StopAll);
+    // Central frequency correction (NCO) between resampler (2 sps) and Gardner.
+    // Config is provided via Params in main (see StartThreads call).
+    freqCorrector_.Start(&oBufferResampled, &mtxResampRing, &CvResampData,
+                         &oBufferFreqCorrected, &mtxFreqCorrRing, &CvFreqCorrData,
+                         &phaseTrackingDD_, &StopAll);
+    timingTracking_.Start(&oBufferFreqCorrected, &mtxFreqCorrRing, &CvFreqCorrData, &StopAll, displayPeriodSec);
+    phaseTrackingDD_.Start(&timingTracking_, &StopAll, displayPeriodSec);
 
     FilterThread = std::thread(&Receiver::OperateFilter, this);
     ViterbiManagerThread = std::thread(&Receiver::OperateViterbiManager, this);
@@ -114,11 +189,16 @@ void Receiver::StopThreads(void)
     CvVitManager2Vit.notify_all();
     CvFilterUser.notify_all();
     CvResampData.notify_all();
+    CvFreqCorrData.notify_all();
     if(FilterThread.joinable())
         FilterThread.join();
     resampler_.StopJoin();
+    freqCorrector_.StopJoin();
     timingTracking_.StopJoin();
     phaseTrackingDD_.StopJoin();
+    if (constellationDisplay_)
+        constellationDisplay_->ClosePipeKeepAlive();
+    constellationDisplay_.reset();
     for(int i = 0; i < 3;i++)
         CvViterbis2VitManager[i].notify_one();
     for(int i = 0; i < 3;i++)
@@ -130,9 +210,13 @@ void Receiver::StopThreads(void)
         ViterbiManagerThread.join();
 }
 
+/**
+ * @brief RX filter thread: IQ shorts → matched filter ring, symbol-rate acquisition, resampler feed.
+ */
 void Receiver::OperateFilter(void)
 {
     auto throughput_window_start = std::chrono::steady_clock::now();
+    auto rx_filter_console_window_start = std::chrono::steady_clock::now();
     uint64_t samples_in_window = 0;
     uint64_t samples_total = 0;
     const auto wall_start = std::chrono::steady_clock::now();
@@ -237,7 +321,7 @@ void Receiver::OperateFilter(void)
                     const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
                     const double t_sim =
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-                    std::cout << "[SymbolRateEstimator] Detected: " << (est.SymbolRateHz / 1e6)
+                    std::cout << "[SymbolRateEstimator] \033[32mDetected\033[0m: " << (est.SymbolRateHz / 1e6)
                               << " Msym/s"
                               << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
                               << " t_sim=" << t_sim << " s"
@@ -245,14 +329,15 @@ void Receiver::OperateFilter(void)
                               << " (search kMax=" << est.SearchKMaxBins
                               << ", fMax=" << est.SearchMaxOffsetHz << " Hz)"
                               << " (FFT res " << est.FftResolutionHz
-                              << " Hz, peak/median " << est.PeakToMedian << ")" << std::endl;
+                              << " Hz, peak/median " << est.PeakToMedian
+                              << ", threshold " << SymRatePeakToMedianThreshold << ")" << std::endl;
                 }
                 else
                 {
                     const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
                     const double t_sim =
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-                    std::cout << "[SymbolRateEstimator] Not detected"
+                    std::cout << "[SymbolRateEstimator] \033[31mNot detected\033[0m"
                               << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
                               << " t_sim=" << t_sim << " s"
                               << " t_rate=" << t_rate << " s"
@@ -260,7 +345,8 @@ void Receiver::OperateFilter(void)
                               << " (search kMax=" << est.SearchKMaxBins
                               << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
                               << ", dF=" << est.FftResolutionHz << " Hz"
-                              << ", peak/median=" << est.PeakToMedian << ")"
+                              << ", peak/median=" << est.PeakToMedian
+                              << ", threshold=" << SymRatePeakToMedianThreshold << ")"
                               << std::endl;
                 }
             }
@@ -271,29 +357,31 @@ void Receiver::OperateFilter(void)
                     // Skip re-estimation while Gardner is locked to avoid delocking transients.
                     symrate_collecting = false;
                     SymRateBatchCounter = 0;
-                    continue;
                 }
-                const double prev = SymbolRateEstimateHz.load(std::memory_order_relaxed);
-                const double rel = std::abs(est.SymbolRateHz - prev) / std::max(1.0, prev);
-                if (est.PeakToMedian >= SymRatePeakToMedianThreshold && rel <= SymRateMaxRelativeJump)
+                else
                 {
-                    const double alpha = 1.0 / static_cast<double>(std::max(2, SymRateAcceptedCount + 1));
-                    const double refined = (1.0 - alpha) * prev + alpha * est.SymbolRateHz;
-                    SymbolRateEstimateHz.store(refined, std::memory_order_relaxed);
-                    SymRateAcceptedCount++;
-                    resampler_.UpdateFromSymbolRateHz(refined);
-                    newSymRateEstimate = true;
-                    const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
-                    const double t_sim =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-                    const double delta_ppm = (refined - prev) * 1.0e6 / std::max(1.0, prev);
-                    std::cout << "[SymbolRateEstimator] Re-estimated: " << (refined / 1e6)
-                              << " Msym/s"
-                              << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
-                              << " t_sim=" << t_sim << " s"
-                              << " t_rate=" << t_rate << " s"
-                              << " (delta " << delta_ppm << " ppm, peak/median " << est.PeakToMedian << ")"
-                              << std::endl;
+                    const double prev = SymbolRateEstimateHz.load(std::memory_order_relaxed);
+                    const double rel = std::abs(est.SymbolRateHz - prev) / std::max(1.0, prev);
+                    if (est.PeakToMedian >= SymRatePeakToMedianThreshold && rel <= SymRateMaxRelativeJump)
+                    {
+                        const double alpha = 1.0 / static_cast<double>(std::max(2, SymRateAcceptedCount + 1));
+                        const double refined = (1.0 - alpha) * prev + alpha * est.SymbolRateHz;
+                        SymbolRateEstimateHz.store(refined, std::memory_order_relaxed);
+                        SymRateAcceptedCount++;
+                        resampler_.UpdateFromSymbolRateHz(refined);
+                        newSymRateEstimate = true;
+                        const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
+                        const double t_sim =
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
+                        const double delta_ppm = (refined - prev) * 1.0e6 / std::max(1.0, prev);
+                        std::cout << "[SymbolRateEstimator] \033[32mRe-estimated\033[0m: " << (refined / 1e6)
+                                  << " Msym/s"
+                                  << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                                  << " t_sim=" << t_sim << " s"
+                                  << " t_rate=" << t_rate << " s"
+                                  << " (delta " << delta_ppm << " ppm, peak/median " << est.PeakToMedian << ")"
+                                  << std::endl;
+                    }
                 }
             }
             else
@@ -301,7 +389,7 @@ void Receiver::OperateFilter(void)
                 const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
                 const double t_sim =
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-                std::cout << "[SymbolRateEstimator] Re-estimation not detected"
+                std::cout << "[SymbolRateEstimator] \033[31mRe-estimation not detected\033[0m"
                           << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
                           << " t_sim=" << t_sim << " s"
                           << " t_rate=" << t_rate << " s"
@@ -347,14 +435,22 @@ void Receiver::OperateFilter(void)
             samples_in_window += SPB;
 
             auto now_tp = std::chrono::steady_clock::now();
-            double dt = std::chrono::duration<double>(now_tp - throughput_window_start).count();
-            if (dt >= 1.0)
+            const double dtMeas =
+                std::chrono::duration<double>(now_tp - throughput_window_start).count();
+            if (dtMeas >= rxThroughputMeasurePeriodSec_)
             {
-                double msps = static_cast<double>(samples_in_window) / dt / 1e6;
-                std::cout << "RX Filter throughput: " << msps << " Msps" << std::endl;
-
-                throughput_window_start = now_tp;
+                const double msps = static_cast<double>(samples_in_window) / dtMeas / 1e6;
+                lastRxFilterThroughputMsps_.store(msps, std::memory_order_relaxed);
+                throughput_window_start = std::chrono::steady_clock::now();
                 samples_in_window = 0;
+            }
+            const double dtConsole =
+                std::chrono::duration<double>(now_tp - rx_filter_console_window_start).count();
+            if (displayPeriodSec_ > 0.0 && dtConsole >= displayPeriodSec_)
+            {
+                std::cout << "[RXFilter] throughput=" << lastRxFilterThroughputMsps_.load(std::memory_order_relaxed)
+                          << " Msps" << std::endl;
+                rx_filter_console_window_start = std::chrono::steady_clock::now();
             }
 
             CvFilterUser.notify_one();
@@ -375,6 +471,9 @@ void Receiver::DifferentialDecode(unsigned char *In, unsigned char *Out, unsigne
 
     Last = In[Length];
 }
+/**
+ * @brief One Viterbi worker: hypothesis @a p indexes @c DemodulatorQ / @c oViterbi slot.
+ */
 void Receiver::OperateViterbi(void *p)
 {
     int *ip = (int*) p;
@@ -438,6 +537,9 @@ void Receiver::OperateViterbi(void *p)
     }
 }
 
+/**
+ * @brief Fan-out symbols to decoders, four-way metric lock, merge, PRBS/descramble, output queue, optional constellation.
+ */
 void Receiver::OperateViterbiManager(void)
 {
     NumBitsAll = 0;
@@ -459,6 +561,9 @@ void Receiver::OperateViterbiManager(void)
     constexpr int kSymFrame = ReceiverInputBatchIQSymbols;
     alignas(32) float pendingI[kSymFrame];
     alignas(32) float pendingQ[kSymFrame];
+    auto lastConstellationDisplay = std::chrono::steady_clock::now();
+    uint64_t symbols_total = 0;
+    const auto wall_start = std::chrono::steady_clock::now();
 
     while (!StopAll)
     {
@@ -475,6 +580,87 @@ void Receiver::OperateViterbiManager(void)
 
         if (!phaseTrackingDD_.WaitPopSymbolFrame(pendingI, pendingQ, kSymFrame))
             break;
+        symbols_total += static_cast<uint64_t>(kSymFrame);
+
+        if (constellationDisplay_ && constellationCfg_.PeriodSec > 0.0)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastConstellationDisplay >= std::chrono::duration<double>(constellationCfg_.PeriodSec))
+            {
+                const double t_rate = static_cast<double>(symbols_total) / SymbolRate;
+                const double t_sim = std::chrono::duration<double>(now - wall_start).count();
+                // Extra status overlay for the constellation window (space-separated key=value).
+                // Keep it short to avoid slowing down the pipe/GUI.
+                const double symRateHz = SymbolRateEstimateHz.load(std::memory_order_relaxed);
+                const double symRateMsps = symRateHz / 1e6;
+                // Symbol-rate estimator error in ppm, referenced to NOMINAL symbol rate.
+                const double symRatePpm = (symRateHz > 0.0) ? ((symRateHz - SymbolRate) * 1.0e6 / SymbolRate) : 0.0;
+                // Coarse/fixed ppm correction from SymbolRateEstimator (requested).
+                // Channel totalPpm affects symbol rate with opposite sign in our estimator convention, so we negate here.
+                const double symRateCorrPpm = -symRatePpm;
+
+                // Gardner ppm residual estimate from omega deviation around nominal (fine correction).
+                const double omega = timingTracking_.GetGardnerOmega();
+                const double omegaNom = timingTracking_.GetGardnerOmegaNom();
+                // From omega ≈ Fs/Rs and omegaNom = Fs/Rs_nom => Rs/Rs_nom ≈ omegaNom/omega.
+                // totalPpm ≈ (omegaNom/omega - 1) * 1e6
+                const double gardnerPpm = (omega > 1e-20 && omegaNom > 1e-20) ? ((omegaNom / omega) - 1.0) * 1.0e6 : 0.0;
+
+                // Requested total corrected ppm: coarse (SymbolRateEstimator) + fine (Gardner).
+                const double rxTotalPpmCorr = symRateCorrPpm + gardnerPpm;
+                const int gardLocked = timingTracking_.IsLocked() ? 1 : 0;
+                const int phaseLocked = phaseTrackingDD_.IsLocked() ? 1 : 0;
+                const int vitLocked = ViterbiSynchronized ? 1 : 0;
+                const int prbsLocked = PRBSSynchronized ? 1 : 0;
+
+                const int centralReady = freqCorrector_.IsFreqReady() ? 1 : 0;
+                const double centralTargetHz = freqCorrector_.GetTargetHz();
+                const double centralNcoHz = freqCorrector_.GetNcoHz();
+                const double gainDb = freqCorrector_.GetGainDb();
+                const double phaseFreqHz = phaseTrackingDD_.GetLastFreqEstHz();
+
+                const unsigned long long numBits = static_cast<unsigned long long>(NumBitsAll);
+                const unsigned long long numErrors = static_cast<unsigned long long>(NumErrorsAll);
+                const double ber = (numBits > 0ULL) ? (static_cast<double>(numErrors) / static_cast<double>(numBits)) : 0.0;
+
+                const double samplerMsps = pSampler ? pSampler->GetLastThroughputMsps() : 0.0;
+                const double rxFilterMsps = lastRxFilterThroughputMsps_.load(std::memory_order_relaxed);
+
+                // Channel applied values (if available).
+                double chanFreqHz = 0.0;
+                double chanTotalPpm = 0.0;
+                double chanGainDb = 0.0;
+                int chanSeg = 0;
+                double chanTRate = 0.0;
+                if (pChannel_)
+                {
+                    const auto s = pChannel_->GetCurrentApplied();
+                    chanFreqHz = s.FreqHz;
+                    chanTotalPpm = s.TotalPpm;
+                    chanGainDb = s.GainDb;
+                    chanSeg = s.Segment;
+                    chanTRate = s.TRate;
+                }
+
+                char extra[512];
+                std::snprintf(extra, sizeof(extra),
+                              "symRateMsps=%.6f symRatePpm=%.3f gardLocked=%d phaseLocked=%d vitLocked=%d prbsLocked=%d "
+                              "symRateCorrPpm=%.3f gardnerPpm=%.3f rxTotalPpmCorr=%.3f "
+                              "numBits=%llu numErrors=%llu ber=%.6e "
+                              "samplerMsps=%.3f rxFilterMsps=%.3f "
+                              "centralReady=%d centralTargetHz=%.3f centralNcoHz=%.3f gainDb=%.3f phaseFreqHz=%.3f "
+                              "chanFreqHz=%.3f chanTotalPpm=%.6f chanGainDb=%.3f chanSeg=%d chanTRate=%.3f",
+                              symRateMsps, symRatePpm, gardLocked, phaseLocked, vitLocked, prbsLocked,
+                              symRateCorrPpm, gardnerPpm, rxTotalPpmCorr,
+                              numBits, numErrors, ber,
+                              samplerMsps, rxFilterMsps,
+                              centralReady, centralTargetHz, centralNcoHz, gainDb, phaseFreqHz,
+                              chanFreqHz, chanTotalPpm, chanGainDb, chanSeg, chanTRate);
+
+                constellationDisplay_->UpdateEx(pendingI, pendingQ, kSymFrame, t_sim, t_rate, std::string(extra));
+                lastConstellationDisplay = now;
+            }
+        }
 
         {
                 for(int i = 0; i < 3; i++)
@@ -533,6 +719,8 @@ void Receiver::OperateViterbiManager(void)
                     break;
                 if(!ViterbiSynchronized)
                 {
+                    static bool prevViterbiLocked = false;
+                    static auto lastViterbiStatus = std::chrono::steady_clock::now();
                     for(int i = 0; i < 3; i++)
                     {
                         std::unique_lock<std::mutex> lk(mtxQueues);
@@ -546,13 +734,18 @@ void Receiver::OperateViterbiManager(void)
                         break;
                     //Test if Synchronization
                     int BestIndex[3];
-                    bool PassThresh[3];
                     __m128 mThresh = _mm_set1_ps(ViterbiThreshold1);
                     bool Success = true;
+                    float minMargin[3] = {0.0f, 0.0f, 0.0f};
+                    float bestMetrics[3] = {0.0f, 0.0f, 0.0f};
                     for(int i = 0; i < 3; i++)
                     {
                         BestIndex[i] = 0;
-                        float BestMetrics = VitSyncResults[i].Metrics[0];
+                        float m0 = VitSyncResults[i].Metrics[0];
+                        float m1 = VitSyncResults[i].Metrics[1];
+                        float m2 = VitSyncResults[i].Metrics[2];
+                        float m3 = VitSyncResults[i].Metrics[3];
+                        float BestMetrics = m0;
                         for(int j = 1; j < 4; j++)
                         {
                             if(VitSyncResults[i].Metrics[j] < BestMetrics)
@@ -561,6 +754,14 @@ void Receiver::OperateViterbiManager(void)
                                 BestMetrics = VitSyncResults[i].Metrics[j];
                             }
                         }
+                        bestMetrics[i] = BestMetrics;
+                        // Compute smallest margin to competing hypotheses: min_j!=best (Mj - Mbest).
+                        // This is what the threshold check below enforces.
+                        const float best = BestMetrics;
+                        float margins[4] = {m0 - best, m1 - best, m2 - best, m3 - best};
+                        margins[BestIndex[i]] = 1e7f;
+                        minMargin[i] = std::min(std::min(margins[0], margins[1]), std::min(margins[2], margins[3]));
+
                         VitSyncResults[i].Metrics[BestIndex[i]] = 1e7;
                         __m128 mResults = _mm_loadu_ps(VitSyncResults[i].Metrics);
                         __m128 mBest = _mm_set1_ps(BestMetrics);
@@ -601,8 +802,50 @@ void Receiver::OperateViterbiManager(void)
                                 break;   
                             }
                             ViterbiSynchronized = true;
+                            std::cout << "[ViterbiSync] \033[32mLOCKED\033[0m"
+                                      << " thresh=" << ViterbiThreshold1
+                                      << " minMargin=(" << minMargin[0] << ", " << minMargin[1] << ", " << minMargin[2] << ")"
+                                      << " bestIndex=(" << BestIndex[0] << ", " << BestIndex[1] << ", " << BestIndex[2] << ")"
+                                      << std::endl;
+                            prevViterbiLocked = true;
                             for(int i = 0; i < 3; i++)
                                 oViterbi[i].reset_decoder();
+                        }
+                        else
+                        {
+                            // Thresholds passed but hypotheses disagree.
+                            prevViterbiLocked = false;
+                        }
+                    }
+                    else
+                    {
+                        // Failed threshold: at least one block has insufficient margin vs competitors.
+                        prevViterbiLocked = false;
+                    }
+
+                    // Periodic status (even before first lock) to explain why it's not locked.
+                    {
+                        const auto now = std::chrono::steady_clock::now();
+                        if (displayPeriodSec_ > 0.0 &&
+                            now - lastViterbiStatus >= std::chrono::duration<double>(displayPeriodSec_))
+                        {
+                            const char* reason = "unknown";
+                            if (!Success)
+                                reason = "margin_below_threshold";
+                            else if (!((BestIndex[0] == BestIndex[1]) && (BestIndex[0] == BestIndex[2])))
+                                reason = "hypothesis_mismatch";
+                            else
+                                reason = "locked_pending";
+
+                            std::cout << "[ViterbiSync] status"
+                                      << " locked=" << (ViterbiSynchronized ? 1 : 0)
+                                      << " reason=" << reason
+                                      << " thresh=" << ViterbiThreshold1
+                                      << " minMargin=(" << minMargin[0] << ", " << minMargin[1] << ", " << minMargin[2] << ")"
+                                      << " bestIndex=(" << BestIndex[0] << ", " << BestIndex[1] << ", " << BestIndex[2] << ")"
+                                      << " bestMetrics=(" << bestMetrics[0] << ", " << bestMetrics[1] << ", " << bestMetrics[2] << ")"
+                                      << std::endl;
+                            lastViterbiStatus = now;
                         }
                     }
                 }
@@ -668,9 +911,19 @@ void Receiver::OperateViterbiManager(void)
                         if(!PRBSSynchronized)
                         {
                             int PtrStart;
-                            PRBSSynchronized = SyncPRBS(OutputAll+PtrRdOut, PtrStart, PRBSSeed);
+                            int NumErrorsAtLock = 0;
+                            // Debug: corrupt the descrambled PRBS stream before lock detection.
+                            // When PRBSInjectStride > 0, PRBS sync should fail (stay unlocked).
+                            InjectPRBSErrorDeterministic(OutputAll + PtrRdOut, BatchSize3);
+                            PRBSSynchronized = SyncPRBS(OutputAll+PtrRdOut, PtrStart, PRBSSeed, NumErrorsAtLock);
                             if(PRBSSynchronized)
                             {
+                                std::cout << "[PRBS] \033[32mLOCKED\033[0m"
+                                          << " NumErrors=" << NumErrorsAtLock
+                                          << " thresh=" << PRBSThreshold
+                                          << " PtrStart=" << PtrStart
+                                          << " Seed=" << PRBSSeed
+                                          << std::endl;
                                 oPrbs.CreateOutputs(PRBSSeed, BatchSize3 - PtrStart, PrbsOut);
                                 CountErrors(OutputAll+PtrRdOut+PtrStart, PrbsOut, BatchSize3-PtrStart);
                             }
@@ -773,9 +1026,29 @@ void Receiver::CountErrors(unsigned char *Input, unsigned char *Template, int Le
     }
     NumBitsAll += Length;
 }
-bool Receiver::SyncPRBS(unsigned char *In, int &PtrStart,unsigned int &Seed)
+
+/**
+ * @brief Deterministic PRBS error injection used to test PRBS lock behavior.
+ *
+ * This flips bits directly in the descrambled byte buffer passed to SyncPRBS().
+ * Intended for debugging only.
+ */
+static void InjectPRBSErrorDeterministic(unsigned char* buf, int length)
+{
+    if (PRBSInjectStride <= 0 || !buf || length <= 0)
+        return;
+
+    const int start = std::max(0, PRBSInjectStart);
+    for (int i = start; i < length; ++i)
+    {
+        if (((i - PRBSInjectStart) % PRBSInjectStride) == 0)
+            buf[i] ^= 1;
+    }
+}
+bool Receiver::SyncPRBS(unsigned char *In, int &PtrStart,unsigned int &Seed, int& NumErrorsAtLock)
 {
     bool Success = false;
+    NumErrorsAtLock = 0;
 
 
     int Ptr = BatchSize1 - 23;
@@ -808,6 +1081,7 @@ bool Receiver::SyncPRBS(unsigned char *In, int &PtrStart,unsigned int &Seed)
         if(NumErrors <= PRBSThreshold)
         {
             Success = true;
+            NumErrorsAtLock = NumErrors;
             PtrStart = Ptr1 + 128;
         }
         else {

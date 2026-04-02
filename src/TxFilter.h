@@ -1,3 +1,7 @@
+/**
+ * @file TxFilter.h
+ * @brief Root raised-cosine pulse shaping: @c GenerateSqrtrcFilter + Intel IPP FIR @c ippsFIRSR, @c TxNSS sps/symbol.
+ */
 #pragma once
 #include "ipp.h"
 #include <math.h>

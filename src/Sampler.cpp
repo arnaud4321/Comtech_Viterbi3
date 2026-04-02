@@ -1,12 +1,24 @@
+/**
+ * @file Sampler.cpp
+ * @brief Producer thread: channel shorts → @c BufferShort ring for the receiver matched-filter thread.
+ *
+ * @details **OperateSampler** loop: @c CopyOutputSamples from @ref AWGNChannel into a local batch, copy into
+ * @c oBuffer under @c mtxSamplerBuffer_ (waits if @c AlmostFull — backpressure). Updates complex-Msps over
+ * @c throughputMeasurePeriodSec_ and optional @c [Sampler] console line every @c displayPeriodSec_.
+ * After each batch, if wall time lags nominal @c TimeBatch × @c NumBatches, sleeps to approximate real-time
+ * pacing (@c Debug multiplies batch duration). Notifies @c CvSamplerUser so @c ReadFilterBatch can proceed.
+ */
+
 #include "Sampler.h"
 #include "AWGNChannel.h"
 #include <chrono>
 #include <cstring>
 #include <thread>
+#include <atomic>
 
 
 
-extern bool Finish;
+extern std::atomic<bool> Finish;
 Sampler::Sampler(bool DebugIn):Debug(DebugIn),oBuffer(128*SPB,2*SPB)
 { 
 #ifdef DEBUG_SAMPLER
@@ -60,12 +72,16 @@ bool Sampler::ReadFilterBatch(short* dst, int nShorts, bool& stopAll)
     return true;
 }
 
+/**
+ * @brief Thread body: pull IQ shorts from channel, push ring, throughput + optional pacing.
+ */
 void Sampler::OperateSampler(void)
 {
     NumBatches = 0;
     auto Start = std::chrono::high_resolution_clock::now();
 
     auto ThroughputWindowStart = std::chrono::steady_clock::now();
+    auto SamplerConsoleWindowStart = std::chrono::steady_clock::now();
     uint64_t SamplesInWindow = 0;
 
     while(!StopAll)
@@ -87,14 +103,22 @@ void Sampler::OperateSampler(void)
         SamplesInWindow += SPB; // complex samples per batch
 
         auto nowTp = std::chrono::steady_clock::now();
-        double dt = std::chrono::duration<double>(nowTp - ThroughputWindowStart).count();
-        if (dt >= 1.0)
+        const double dtMeas =
+            std::chrono::duration<double>(nowTp - ThroughputWindowStart).count();
+        if (dtMeas >= throughputMeasurePeriodSec_)
         {
-            double msps = static_cast<double>(SamplesInWindow) / dt / 1e6;
-            std::cout << "Sampler throughput: " << msps << " Msps" << std::endl;
-
-            ThroughputWindowStart = nowTp;
+            const double msps = static_cast<double>(SamplesInWindow) / dtMeas / 1e6;
+            lastThroughputMsps_.store(msps, std::memory_order_relaxed);
+            ThroughputWindowStart = std::chrono::steady_clock::now();
             SamplesInWindow = 0;
+        }
+        const double dtConsole =
+            std::chrono::duration<double>(nowTp - SamplerConsoleWindowStart).count();
+        if (displayPeriodSec_ > 0.0 && dtConsole >= displayPeriodSec_)
+        {
+            std::cout << "[Sampler] throughput=" << lastThroughputMsps_.load(std::memory_order_relaxed)
+                      << " Msps" << std::endl;
+            SamplerConsoleWindowStart = std::chrono::steady_clock::now();
         }
 
         # ifdef DEBUG_SAMPLER
@@ -105,7 +129,7 @@ void Sampler::OperateSampler(void)
             FILE *fid = fopen("SamplerOut.bin","wb");
             fwrite(OutAllI,sizeof(short),PtrOutAll,fid);
             fclose(fid);
-            Finish = true;
+            Finish.store(true, std::memory_order_relaxed);
             cout<<"Exiting"<<endl;
             exit(-1);
         }

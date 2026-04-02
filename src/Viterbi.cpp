@@ -1,3 +1,14 @@
+/**
+ * @file Viterbi.cpp
+ * @brief Rate-1/2 K=7 trellis: branch metrics, SIMD ACS, survivor memory, traceback; @c Decode entry.
+ *
+ * @details Constructor allocates path metrics, survivor bits, decoding tables, polynomials @c 0171/@c 0133,
+ * and AVX shuffle metadata per @c DecoderID (phase alignment). **Decode** — @c CalcMetrics2 soft metrics,
+ * @c AcsAll / @c AcsAllNew per symbol, periodic @c traceback_mid; parameters @c ExchangeIQ, @c SignI, @c SignQ select
+ * the four metric-alignment trials used before @ref Receiver locks @c ViterbiParams; @c MetricsGrowth is reported
+ * for that comparison. Puncturing tables are not initialized here.
+ */
+
 #include "Viterbi.h"
 #include <emmintrin.h>
 #include <immintrin.h>
@@ -92,7 +103,8 @@ Viterbi::~Viterbi(void)
 	_mm_free(vecPathMetMem);
 	_mm_free(mArranged);
 	_mm_free(mPermCalc);
-	delete[] DiffPunc;
+	if (DiffPunc)
+		delete[] DiffPunc;
 	delete [] ivecGenPolys;
 	_mm_free(mOffset);
 }
@@ -282,6 +294,9 @@ void Viterbi::add_comp_select(int intNewState, float * BranchMetrics,  int *intD
 }
 
 
+/**
+ * @brief Soft-input decode of @a InputLength QPSK symbols; writes bits to @a Output; updates @a MetricsGrowth.
+ */
 void Viterbi::Decode(float *InputI, float *InputQ, unsigned int InputLength, unsigned char *Output, bool ExchangeIQ, float SignI, float SignQ, float &MetricsGrowth)
 {
 	

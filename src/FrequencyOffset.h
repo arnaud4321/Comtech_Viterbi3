@@ -1,3 +1,11 @@
+/**
+ * @file FrequencyOffset.h
+ * @brief Digital complex NCO: 48-bit phase accumulator, LUT cos/sin, in-place multiply on I/Q (@c CreateOutputs).
+ *
+ * @details @c SetFrequency sets per-sample phase increment (from Hz and @c SamplingFrequency). @c SetAcceleration
+ * adds a per-sample change to that increment (ramp). @c CreateOutputs applies @f$(I+jQ)(e^{j\phi})@f$ per sample using
+ * gathered LUT values; phase advances each sample. Used by @ref AWGNChannel and @ref ReceiverFreqCorrector.
+ */
 #pragma once
 //#define __INTEL_COMPILER_USE_INTRINSIC_PROTOTYPES 1
 #include "definitions.h"

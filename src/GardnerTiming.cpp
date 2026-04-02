@@ -1,3 +1,12 @@
+/**
+ * @file GardnerTiming.cpp
+ * @brief Oversampled ring, Lagrange-4 interpolation, Gardner TED, PI loop on @f$\omega@f$, lock from @f$\omega@f$ stability.
+ *
+ * @details **ProcessBlock** — @c PushToRing then loop: one TED term and one on-time output per symbol.
+ * @f$\omega@f$ / PI run only every @c updatePeriod_ **output symbols** (~ @f$\mathrm{updatePeriod\_}\,\omega/F_s@f$ s apart).
+ * See @ref GardnerTiming.
+ */
+
 #include "GardnerTiming.h"
 #include "definitions.h"
 
@@ -72,8 +81,11 @@ void GardnerTiming::Reset(double omegaNom, double kp, double ki, int updatePerio
 #endif
 }
 
+/**
+ * @brief Ingest @a inLen samples at 2 sps; write up to @a outMax one-sps symbols to @a outI / @a outQ.
+ */
 int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
-                                float* outI, float* outQ, int outMax)
+                     float* outI, float* outQ, int outMax)
 {
     if (!inI || !inQ || !outI || !outQ || inLen < 8 || outMax <= 0)
         return 0;
@@ -239,7 +251,7 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
             static_cast<double>(outCount) - 0.5 * static_cast<double>(inLen);
         const double globalErr =
             static_cast<double>(gGardnerDebit.sumOut) - 0.5 * static_cast<double>(gGardnerDebit.sumIn);
-        std::cerr << "[Gardner DEBIT] blk=" << gGardnerDebit.blocks << " inLen=" << inLen << " nSym=" << outCount
+        std::cout << "[Gardner DEBIT] blk=" << gGardnerDebit.blocks << " inLen=" << inLen << " nSym=" << outCount
                   << " ratio(2*nSym/inLen)=" << ratio << " deficit_blk(nSym-inLen/2)=" << deficitBlk
                   << " tStart=" << tLoopStart << " tEnd=" << tLoopEnd
                   << " dT=" << (tLoopEnd - tLoopStart) << " omega_=" << omega_

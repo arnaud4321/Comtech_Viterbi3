@@ -1,8 +1,20 @@
+/**
+ * @file SymbolRateEstimator.cpp
+ * @brief Implementation: I/Q window → optional Lagrange upsample → real-valued @f$|r[n]|@f$ FFT → peak band @f$\pm k_{\max}@f$ around @f$F_s/2@f$.
+ *
+ * @details **PushBatch** — Append batches until @c Fill == @c Nfft.
+ * **RunEstimation** — Optionally interpolate to @c NfftOs (@c InterpLagrange4, @c OsFactor). Build FFT input
+ * @f$\Re = |r[n]|@f$, @f$\Im = 0@f$. @c fftwf_execute; collect @f$|X[k]|^2@f$ for @f$k@f$ near @f$k_0@f$
+ * (code: @c f0Hz = 0.5*FsHz mapped through @c fsUsed / @c nFftUsed). Skip central bin @f$k_0@f$ when picking @c bestK;
+ * parabola on @f$y_L,y_C,y_R@f$ → @c SymbolRateHz. Reset @c Fill when done. Acceptance logic lives in @ref Receiver.
+ */
+
 #include "SymbolRateEstimator.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <fftw3.h>
 #include <sys/stat.h>
 
@@ -54,11 +66,12 @@ SymbolRateEstimator::~SymbolRateEstimator()
         fftwf_free(FftOutOs);
 }
 
-void SymbolRateEstimator::Reset(double samplingFreqHz, int fftSize, int maxOffsetHz)
+void SymbolRateEstimator::Reset(double samplingFreqHz, int fftSize, int maxOffsetHz, double peakToMedianThreshold)
 {
     FsHz = samplingFreqHz;
     Nfft = ClampPow2(fftSize);
     MaxOffsetHz = std::max(1000, maxOffsetHz);
+    PeakToMedianThreshold = std::max(1.0, peakToMedianThreshold);
     Fill = 0;
     BufferI.assign(Nfft, 0.0f);
     BufferQ.assign(Nfft, 0.0f);
@@ -136,6 +149,9 @@ int SymbolRateEstimator::GetRequiredBatches(int samplesPerBatch) const
     return (Nfft + samplesPerBatch - 1) / samplesPerBatch;
 }
 
+/**
+ * @brief Append one batch toward the @c Nfft-sample FFT window; true when full.
+ */
 bool SymbolRateEstimator::PushBatch(const float* I, const float* Q, int length)
 {
     if (!I || !Q || length <= 0)
@@ -153,6 +169,9 @@ bool SymbolRateEstimator::PushBatch(const float* I, const float* Q, int length)
     return Fill >= Nfft;
 }
 
+/**
+ * @brief Execute the FFT-based symbol-rate estimate on the accumulated @c Nfft-sample window.
+ */
 SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
 {
     SymbolRateEstimateResult out;
@@ -194,8 +213,8 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
     {
         const float ii = inI[n];
         const float qq = inQ[n];
+        // FFT input: per-sample magnitude |r| as real part, zero imaginary (see SymbolRateEstimator.h).
         const float a = std::sqrt(ii * ii + qq * qq);
-        // No frequency shift: keep tone around Fs/2 in-place (we will search around Fs/2).
         static_cast<fftwf_complex*>(fftInPtr)[n][0] = a;
         static_cast<fftwf_complex*>(fftInPtr)[n][1] = 0.0f;
     }
@@ -219,8 +238,7 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
 
     std::vector<float> mags;
     mags.reserve(2 * kMax + 1);
-    // We search around the *physical* center FsBase/2 (not fsUsed/2).
-    // After oversampling, that tone moves to FsBase/2 Hz which corresponds to k0 = f0 * N / fsUsed.
+    // Map physical Fs/2 (base sample rate FsHz) onto the FFT bin grid at fsUsed (FsHz or FsHz*OsFactor).
     const double f0Hz = 0.5 * FsHz;
     const int k0 = std::max(0, std::min(nFftUsed - 1, static_cast<int>(std::llround(f0Hz * nFftUsed / fsUsed))));
     int bestK = k0;
@@ -296,9 +314,12 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
     const float medianM = std::max(1e-20f, mags[mags.size() / 2]);
     out.PeakToMedian = static_cast<double>(bestM / medianM);
 
-    if (out.PeakToMedian < 50.0)
+    if (out.PeakToMedian < PeakToMedianThreshold)
     {
-        out.FailReason = "peak/median below threshold";
+        static thread_local std::string fail;
+        fail = "peak/median below threshold (peak/median=" + std::to_string(out.PeakToMedian)
+             + ", threshold=" + std::to_string(PeakToMedianThreshold) + ")";
+        out.FailReason = fail.c_str();
         Fill = 0;
         return out;
     }

@@ -1,3 +1,7 @@
+/**
+ * @file BufferFloat.h
+ * @brief Lock-free ring buffer contract for interleaved float I/Q between RX pipeline stages.
+ */
 #pragma once
 #include "cstdlib"
 #include <algorithm>    // std::copy, std::max
@@ -5,9 +9,12 @@
 #include "definitions.h"
 #include <iostream>
 using namespace std;
-// I/Q ring (floats). Multithread contract: all reads/writes of PtrRd/PtrWr must be
-// serialized by the caller (e.g. mtxFilterRing). GetWriteBuffer does not check capacity:
-// the producer must wait for AlmostFull() == false before CreateOutputs + AdvancePtrWr(advance).
+
+/**
+ * @brief Circular I/Q buffer (float). External mutex serializes pointer updates.
+ *
+ * Producer must wait for @ref AlmostFull() == false before @ref AdvancePtrWr after writing.
+ */
 class BufferFloat
 {
 private:

@@ -1,3 +1,12 @@
+/**
+ * @file ReceiverPhaseTrackingDD.cpp
+ * @brief QPSK decision-directed PLL: slice → @c dd_phase_error → 2nd-order loop → rotate → frame queue.
+ *
+ * @details **ThreadMain** — @c WaitPopSymbolFrame from @ref ReceiverTimingTracking; per-sample loop matches
+ * @ref ReceiverPhaseTrackingDD (LUT derotation, @c dd_phase_error, @c kp_/ @c ki_ updates, @c outI/outQ = derotated
+ * @f$z_r@f$ before next symbol’s update). Queues frames for the Viterbi manager.
+ */
+
 #include "ReceiverPhaseTrackingDD.h"
 #include <algorithm>
 #include <chrono>
@@ -54,10 +63,12 @@ ReceiverPhaseTrackingDD::~ReceiverPhaseTrackingDD()
     StopJoin();
 }
 
-void ReceiverPhaseTrackingDD::Start(ReceiverTimingTracking* timingTracking, bool* stopAll)
+void ReceiverPhaseTrackingDD::Start(ReceiverTimingTracking* timingTracking, bool* stopAll,
+                                    double displayPeriodSec)
 {
     timingTracking_ = timingTracking;
     stopAll_ = stopAll;
+    displayPeriodSec_ = displayPeriodSec;
     phaseRad_ = 0.0f;
     freqRadPerSym_ = 0.0f;
     errEma_ = 0.0f;
@@ -166,6 +177,9 @@ void ReceiverPhaseTrackingDD::closeDebugFiles()
 }
 #endif
 
+/**
+ * @brief Phase tracking loop consuming Gardner frames, producing corrected symbol frames.
+ */
 void ReceiverPhaseTrackingDD::ThreadMain()
 {
     alignas(32) float inI[kSymFrame];
@@ -265,7 +279,8 @@ void ReceiverPhaseTrackingDD::ThreadMain()
             const double t_rate = static_cast<double>(symbols_total) / SymbolRate;
             const double t_sim =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-            std::cerr << "[ReceiverPhaseTrackingDD] " << (nowLocked ? "LOCKED" : "UNLOCKED")
+            std::cout << "[ReceiverPhaseTrackingDD] "
+                      << (nowLocked ? "\033[32mLOCKED\033[0m" : "\033[31mUNLOCKED\033[0m")
                       << " t_sim=" << t_sim << " s"
                       << " t_rate=" << t_rate << " s"
                       << " errEma=" << errEma_ << " rad"
@@ -277,13 +292,19 @@ void ReceiverPhaseTrackingDD::ThreadMain()
         // Display residual frequency estimate once per second (from phase slope / PLL freq state).
         {
             const auto now = std::chrono::steady_clock::now();
-            if (now - lastFreqDisplay >= std::chrono::seconds(1))
+            if (displayPeriodSec_ > 0.0 &&
+                now - lastFreqDisplay >= std::chrono::duration<double>(displayPeriodSec_))
             {
                 // freqRadPerSym_ is radians per symbol; convert to Hz using symbol rate.
                 const double f_hz = static_cast<double>(freqRadPerSym_) * SymbolRate / (2.0 * 3.14159265358979323846);
+                lastFreqEstHz_.store(f_hz, std::memory_order_relaxed);
                 const double t_rate = static_cast<double>(symbols_total) / SymbolRate;
                 const double t_sim = std::chrono::duration<double>(now - wall_start).count();
-                std::cerr << "[ReceiverPhaseTrackingDD] freq_est=" << f_hz << " Hz"
+                const bool nowLocked2 = locked_.load(std::memory_order_relaxed);
+                std::cout << "[ReceiverPhaseTrackingDD] freq_est=" << f_hz << " Hz"
+                          << " locked=" << (nowLocked2 ? 1 : 0)
+                          << " errEma=" << errEma_ << " rad"
+                          << " thresh=" << lockThresholdRad_ << " rad"
                           << " t_sim=" << t_sim << " s"
                           << " t_rate=" << t_rate << " s"
                           << std::endl;

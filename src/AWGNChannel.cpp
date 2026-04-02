@@ -1,13 +1,44 @@
+/**
+ * @file AWGNChannel.cpp
+ * @brief Implementation of the multithreaded AWGN channel (noise mix, Es/N0, profile, NCO, SCO, shorts out).
+ *
+ * @details **Pipeline (float domain until @ref ChannelSamplingClockOffset writes @c short IQ into
+ * @c AWGNChannel::OutputBuffer):**
+ *
+ * 1. **GenerateNoise** — Fills a FIFO of AVX-aligned Gaussian buffers (`randn`) consumed by the output thread.
+ * 2. **GenerateOutput** — For each batch: copies transmitter IQ (@ref Transmitter::CopyOutputSamples), combines with
+ *    noise as `mkSig * tx + Stdn * noise` (AVX). **Es/N0** is enforced via `Stdn` and `mkSig` computed in
+ *    @c AWGNChannel::StartThreads() from @ref Params::EsN0, TX average power, a reference constant `Pow0`, and a
+ *    **Backoff** (dB) so that signal+noise scaled together stay below int16 headroom after downstream processing.
+ * 3. Still in **GenerateOutput** — Applies a **time-varying amplitude** `10^(rangeDb/20)` where `rangeDb` follows
+ *    the same four-segment piecewise schedule as frequency (stable → ramp → stable → ramp), driven by
+ *    *simulation time* `t_rate = batchCount * TxOutputBatchDuration`. Pushes a @c FreqChunk (interleaved floats +
+ *    metadata) onto `freqQ_`.
+ * 4. **ApplyFrequencyOffset** — Dequeues each chunk: sets NCO frequency (@ref FrequencyOffset), updates total SCO ppm
+ *    (`ClockMismatchPpm` + Doppler term from carrier offset / `CarrierToSymbolRateRatio` / `SymbolRate`),
+ *    publishes @c GetCurrentApplied() atomics, rotates IQ in place, then forwards interleaved floats to
+ *    @ref ChannelSamplingClockOffset::EnqueueNoisyInterleaved.
+ * 5. **ChannelSamplingClockOffset** (started from @c AWGNChannel::StartThreads()) — Resamples to emulate Rx clock
+ *    error and writes saturated **short** IQ into @c OutputBuffer; @c CopyOutputSamples() is the consumer API for
+ *    @ref Sampler.
+ *
+ * **Stop condition:** after batch index reaches `TransitionCounter[4]` (end of the fourth segment), sets the
+ * global @c Finish flag and stops. **Thread order on shutdown:** @c AWGNChannel::StopThreads() joins noise/output/freq
+ * threads then stops the SCO worker.
+ */
+
 #include "AWGNChannel.h"
 #include "Transmitter.h"
 #include <cstring>
 #include <deque>
 #include <iomanip>
 #include <iostream>
-extern bool Finish;
+#include <atomic>
+extern std::atomic<bool> Finish;
 extern mutex mtxfilethr;
 AWGNChannel::AWGNChannel(unsigned int Seed):NoiseQ(LengthQueue),OutputBuffer(128*TxOutputBatchSize,2*TxOutputBatchSize)
 {
+    // NoiseBatchSize: slightly > one TX batch so slowed-time runs do not run out of noise; 16-aligned for AVX loops.
     oNoiseGen.set_seed(Seed);
     NoiseBatchSize = (int) ((double) TxOutputBatchSize * 1.001); //make sure there will be enough noise even if time is slowed down
     int Tmp = (NoiseBatchSize >> 4)<<4; //make a length of 16
@@ -17,7 +48,9 @@ AWGNChannel::AWGNChannel(unsigned int Seed):NoiseQ(LengthQueue),OutputBuffer(128
     Noise[0] = (float *) _mm_malloc(sizeof(float) * NoiseBatchSize * LengthQueue,32);
     for(int i = 1; i < LengthQueue; i++)
     {
-        Noise[i] = Noise[i-1] + TxOutputBatchSize;
+        // Each slot must be spaced by NoiseBatchSize (randn writes NoiseBatchSize floats).
+        // Using TxOutputBatchSize here would overlap slots and corrupt memory when NoiseBatchSize > TxOutputBatchSize.
+        Noise[i] = Noise[i-1] + NoiseBatchSize;
     }
     #ifdef DEBUG_AWGN
         OutAllI = (short *) _mm_malloc( 20000000*sizeof(short),32);
@@ -36,15 +69,19 @@ void AWGNChannel::StartThreads(void)
     StopAll = false;
     double TxPower = pTx->GetTxPower();
     double kTx = sqrt(TxPower);
+    // Reference symbol energy convention: Pow0 ties Es/N0 to the noise variance used in combination with TX power.
     double Pow0 = 2.0;//constant
     EsN0db = pParams->EsN0;
     double N0 = Pow0*pow(10.0,-0.1*EsN0db);
+    // Digital peak target for I^2+Q^2 after scaling (Backoff dB below full-scale int16 energy).
     double TargetPower = pow(2.0,2*NumBits-1)*pow(10.0,-0.1*Backoff);
     double TotalPower = TxPower + N0;
     double kAll = sqrt(TargetPower/TotalPower);
     double kSig = kAll/kTx;
+    // Per real dimension variance N0/2, scaled same as signal so Es/N0 matches the chosen N0.
     Stdn = sqrt(N0*0.5)*kAll;
     mkSig = _mm256_set1_ps(kSig);
+    // Piecewise schedule in *batches*: stable1 | acc1 | stable2 | acc2 | stop (see GenerateOutput segment switch).
     double n2 = round(pParams->StablePeriod/TxOutputBatchDuration);
     double n1 = round(pParams->AccelerationPeriod/TxOutputBatchDuration);
 
@@ -59,35 +96,65 @@ void AWGNChannel::StartThreads(void)
 
     NoiseQ.Reset();
 
-    const double ppmDoppler =
-        pParams->FrequencyShift * 1.0e6 / (pParams->CarrierToSymbolRateRatio * SymbolRate);
-    const double totalPpm = pParams->ClockMismatchPpm + ppmDoppler;
-    const double eps = totalPpm * 1.0e-6;
+    displayPeriodSec_ = (pParams) ? pParams->DisplayPeriodSec : 1.0;
+
+    const double freqShift0Hz = pParams->InitialFrequencyShift;
+    const double freqShiftDeltaHz = pParams->FrequencyShift;
+    const double freqShiftStartHz = freqShift0Hz;
+    const double freqShiftPeakHz = freqShift0Hz + freqShiftDeltaHz;
+
+    const double rangeDb0 = pParams->InitialGainDb;
+    const double rangeDbDelta = pParams->DynamicRangeDb;
+    const double rangeDbStart = rangeDb0;
+    const double rangeDbLow = rangeDb0 + rangeDbDelta;
+    const double rangeDbMin = std::min(rangeDbStart, rangeDbLow);
+    const double rangeDbMax = std::max(rangeDbStart, rangeDbLow);
+    const double ppmDoppler0 =
+        freqShiftStartHz * 1.0e6 / (pParams->CarrierToSymbolRateRatio * SymbolRate);
+    const double ppmDopplerPeak =
+        freqShiftPeakHz * 1.0e6 / (pParams->CarrierToSymbolRateRatio * SymbolRate);
+    const double ppmDopplerMin = std::min(ppmDoppler0, ppmDopplerPeak);
+    const double ppmDopplerMax = std::max(ppmDoppler0, ppmDopplerPeak);
+    const double totalPpm0 = pParams->ClockMismatchPpm + ppmDoppler0;
+    const double totalPpmPeak = pParams->ClockMismatchPpm + ppmDopplerPeak;
+    const double totalPpmMin = std::min(totalPpm0, totalPpmPeak);
+    const double totalPpmMax = std::max(totalPpm0, totalPpmPeak);
+    const double eps = totalPpm0 * 1.0e-6;
     const double actualSymbolRate = SymbolRate * (1.0 + eps);
 
     std::cout << std::fixed << std::setprecision(6) << "[AWGN] Channel parameters\n"
               << "        Es/N0 (dB):                    " << pParams->EsN0 << '\n'
+              << "        InitialGainDb (dB):          " << pParams->InitialGainDb << '\n'
+              << "        DynamicRangeDb (dB):         " << pParams->DynamicRangeDb << '\n'
+              << "        RangeDb range (dB):          [" << rangeDbMin << " .. " << rangeDbMax << "]\n"
+              << "        InitialFrequencyShift (Hz):  " << pParams->InitialFrequencyShift << '\n'
               << "        FrequencyShift (Hz):         " << pParams->FrequencyShift << '\n'
+              << "        FrequencyShift range (Hz):   [" << freqShiftStartHz << " .. " << freqShiftPeakHz << "]\n"
               << "        ClockMismatchPpm:            " << pParams->ClockMismatchPpm << '\n'
               << "        CarrierToSymbolRateRatio:    " << pParams->CarrierToSymbolRateRatio
               << " (fc/Rs)\n"
               << "        Symbol rate Rs (sym/s):      " << SymbolRate << '\n'
               << "        Actual Rs from ppm (sym/s):  " << actualSymbolRate << '\n'
-              << "        AccelerationPeriod (s):      " << pParams->AccelerationPeriod << '\n'
-              << "        StablePeriod (s):            " << pParams->StablePeriod << '\n'
-              << "        TotalPeriod (s):             " << pParams->TotalPeriod << '\n'
-              << "        SamplingClockOffset total ppm: " << totalPpm << '\n'
+              << "        Stable1 (s):                 " << StablePeriod << '\n'
+              << "        Acceleration1 (s):           " << AccelerationPeriod << '\n'
+              << "        Stable2 (s):                 " << StablePeriod << '\n'
+              << "        Acceleration2 (s):           " << AccelerationPeriod << '\n'
+              << "        TotalPeriod (s):             " << TotalPeriod << '\n'
+              << "        DisplayPeriodSec (s):        " << displayPeriodSec_
+              << (displayPeriodSec_ > 0.0 ? "" : " (periodic status off)") << '\n'
+              << "        SamplingClockOffset total ppm (t=0): " << totalPpm0 << '\n'
+              << "        SamplingClockOffset total ppm range: [" << totalPpmMin << " .. " << totalPpmMax << "]\n"
               << "          clock mismatch component:  " << pParams->ClockMismatchPpm << '\n'
-              << "          Doppler component:         " << ppmDoppler << '\n'
+              << "          Doppler component (t=0):   " << ppmDoppler0 << '\n'
+              << "          Doppler component range:   [" << ppmDopplerMin << " .. " << ppmDopplerMax << "]\n"
               << "          (Doppler from FrequencyShift / (fc/Rs) / Rs)\n";
 
-    samplingClockOffset_.Configure(totalPpm);
+    samplingClockOffset_.Configure(totalPpm0);
     samplingClockOffset_.Start(&OutputBuffer, &mtxOutputBuffer_, &CvUserOut, &CvOutUser, &StopAll);
 
-    // Carrier frequency offset (Hz) applied on complex baseband after noise+gain, before sampling-clock offset.
-    // Uses FrequencyShift from config.json.
+    // NCO initial Hz (per-chunk updates happen in ApplyFrequencyOffset from FreqChunk::freqHz).
     objFreqOffset.SetSamplingFrequency(SamplingFrequency);
-    objFreqOffset.SetFrequency(static_cast<Ipp64f>(pParams->FrequencyShift));
+    objFreqOffset.SetFrequency(static_cast<Ipp64f>(freqShiftStartHz));
 
     NoiseThread = std::thread(&AWGNChannel::GenerateNoise, this);
     OutputThread = std::thread(&AWGNChannel::GenerateOutput, this);
@@ -115,10 +182,11 @@ void AWGNChannel::StopThreads(void)
 }
 
 
+/**
+ * @brief Producer thread: Gaussian noise buffers into @c NoiseQ for @ref GenerateOutput.
+ */
 void AWGNChannel::GenerateNoise(void)
 {
-
-
     #ifdef WRITE_LOG_THR
 	mtxfilethr.lock();
     FILE *fidthr = fopen("LogThreadsInfo.txt","at");
@@ -141,6 +209,9 @@ void AWGNChannel::GenerateNoise(void)
 }
 
 
+/**
+ * @brief Channel output thread: TX + AWGN mix, dynamic range, enqueue chunks for @ref ApplyFrequencyOffset.
+ */
 void AWGNChannel::GenerateOutput(void)
 {
     #ifdef WRITE_LOG_THR
@@ -150,7 +221,9 @@ void AWGNChannel::GenerateOutput(void)
     fclose(fidthr);
     mtxfilethr.unlock();
     #endif
-    int NumSamples = 0;
+    int batchCount = 0;
+    const auto wall_start = std::chrono::steady_clock::now();
+    auto lastStatusDisplay = wall_start;
    
     while(!StopAll)
     {
@@ -167,6 +240,7 @@ void AWGNChannel::GenerateOutput(void)
         if (!pTx->CopyOutputSamples(noisyChunk, TxOutputBatchSize, StopAll))
             break;
 
+        // noisyChunk <- mkSig * tx + Stdn * noise (interleaved float IQ, one float per I or Q sample).
         {
             __m256 mStdn = _mm256_set1_ps(Stdn);
             for (int i = 0; i < TxOutputBatchSize;)
@@ -186,7 +260,7 @@ void AWGNChannel::GenerateOutput(void)
                 _mm256_storeu_ps(noisyChunk + i - 16, mOutl);
                 _mm256_storeu_ps(noisyChunk + i - 8, mOuth);
             }
-            NumSamples += static_cast<unsigned int>(TxOutputBatchSize);
+            batchCount++;
         }
 
 #ifdef DEBUG_AWGN
@@ -214,20 +288,87 @@ void AWGNChannel::GenerateOutput(void)
                 cout << "Saved AWGN " << PtrOutAll << endl;
                 std::this_thread::sleep_for(10ms);
 
-                Finish = true;
+                Finish.store(true, std::memory_order_relaxed);
             }
         }
 #endif
 
-        // Hand-off to dedicated frequency-offset thread.
+        // Decouple heavy NCO + SCO work from TX+noise so OutputThread keeps pulling transmitter samples.
         {
             std::unique_lock<std::mutex> lk(mtxFreqQ_);
             cvFreqQSpace_.wait(lk, [&] { return StopAll || static_cast<int>(freqQ_.size()) < kFreqQDepth; });
             if (StopAll)
                 break;
-            std::vector<float> v(static_cast<size_t>(TxOutputBatchSize));
-            std::copy(noisyChunk, noisyChunk + TxOutputBatchSize, v.begin());
-            freqQ_.push_back(std::move(v));
+
+            const double t_rate = static_cast<double>(batchCount) * TxOutputBatchDuration;
+            if (batchCount >= static_cast<int>(TransitionCounter[4]))
+            {
+                Finish.store(true, std::memory_order_relaxed);
+                StopAll = true;
+                break;
+            }
+
+            // Segment 0..3: carrier offset = InitialFrequencyShift + deltaHz(freq ramp); gainDb ramps with DynamicRangeDb.
+            int seg = 0;
+            double deltaHz = 0.0;
+            double rangeDb = pParams->InitialGainDb;
+            const double a = AccelerationPeriod;
+            const double s = StablePeriod;
+            if (t_rate < s)
+            {
+                seg = 0; // stable1
+                deltaHz = 0.0;
+                rangeDb = pParams->InitialGainDb;
+            }
+            else if (t_rate < s + a)
+            {
+                seg = 1; // acc1: 0 -> +FrequencyShift
+                const double x = (t_rate - s) / std::max(1e-12, a);
+                deltaHz = std::max(0.0, std::min(1.0, x)) * pParams->FrequencyShift;
+                rangeDb = pParams->InitialGainDb +
+                          std::max(0.0, std::min(1.0, x)) * pParams->DynamicRangeDb;
+            }
+            else if (t_rate < s + a + s)
+            {
+                seg = 2; // stable2
+                deltaHz = pParams->FrequencyShift;
+                rangeDb = pParams->InitialGainDb + pParams->DynamicRangeDb;
+            }
+            else
+            {
+                seg = 3; // acc2: +FrequencyShift -> 0
+                const double x = (t_rate - (s + a + s)) / std::max(1e-12, a);
+                deltaHz = (1.0 - std::max(0.0, std::min(1.0, x))) * pParams->FrequencyShift;
+                rangeDb = pParams->InitialGainDb +
+                          (1.0 - std::max(0.0, std::min(1.0, x))) * pParams->DynamicRangeDb;
+            }
+
+            const double freqHz = pParams->InitialFrequencyShift + deltaHz;
+            const double ppmDoppler =
+                freqHz * 1.0e6 / (pParams->CarrierToSymbolRateRatio * SymbolRate);
+            const double totalPpm = pParams->ClockMismatchPpm + ppmDoppler;
+
+            // Amplitude vs time (before NCO): gainDb is an amplitude dB offset → linear gain 10^(gainDb/20).
+            const float gain = static_cast<float>(std::pow(10.0, rangeDb / 20.0));
+            {
+                const __m256 mg = _mm256_set1_ps(gain);
+                for (int i = 0; i < TxOutputBatchSize; i += 8)
+                {
+                    __m256 v = _mm256_loadu_ps(noisyChunk + i);
+                    v = _mm256_mul_ps(v, mg);
+                    _mm256_storeu_ps(noisyChunk + i, v);
+                }
+            }
+
+            FreqChunk chunk;
+            chunk.interleaved.resize(static_cast<size_t>(TxOutputBatchSize));
+            std::copy(noisyChunk, noisyChunk + TxOutputBatchSize, chunk.interleaved.begin());
+            chunk.freqHz = freqHz;
+            chunk.totalPpm = totalPpm;
+            chunk.gainDb = rangeDb;
+            chunk.segment = seg;
+            chunk.t_rate = t_rate;
+            freqQ_.push_back(std::move(chunk));
         }
         cvFreqQData_.notify_one();
 
@@ -236,15 +377,58 @@ void AWGNChannel::GenerateOutput(void)
             NoiseQ.AdvanceRead();
         }
         CvOutNoise.notify_one();
+
+        // Periodic channel status line.
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (displayPeriodSec_ > 0.0 &&
+                now - lastStatusDisplay >= std::chrono::duration<double>(displayPeriodSec_))
+            {
+                const char* segName = "stable1";
+                // Best-effort read of last enqueued segment (no extra locking: we reuse the already pushed logic).
+                // For clarity, we just derive it again from batchCount/t_rate.
+                const double t_rate = static_cast<double>(batchCount) * TxOutputBatchDuration;
+                const double a = AccelerationPeriod;
+                const double s = StablePeriod;
+                double deltaHz = 0.0;
+                if (t_rate < s) { segName = "stable1"; deltaHz = 0.0; }
+                else if (t_rate < s + a) { segName = "acc1"; deltaHz = (t_rate - s) / std::max(1e-12, a) * pParams->FrequencyShift; }
+                else if (t_rate < s + a + s) { segName = "stable2"; deltaHz = pParams->FrequencyShift; }
+                else { segName = "acc2"; deltaHz = (1.0 - (t_rate - (s + a + s)) / std::max(1e-12, a)) * pParams->FrequencyShift; }
+                deltaHz = std::max(0.0, std::min(pParams->FrequencyShift, deltaHz));
+                const double freqHz = pParams->InitialFrequencyShift + deltaHz;
+                const double ppmDoppler =
+                    freqHz * 1.0e6 / (pParams->CarrierToSymbolRateRatio * SymbolRate);
+                const double totalPpm = pParams->ClockMismatchPpm + ppmDoppler;
+                double gainDb = pParams->InitialGainDb;
+                if (t_rate < s) { gainDb = pParams->InitialGainDb; }
+                else if (t_rate < s + a) { gainDb = pParams->InitialGainDb + (t_rate - s) / std::max(1e-12, a) * pParams->DynamicRangeDb; }
+                else if (t_rate < s + a + s) { gainDb = pParams->InitialGainDb + pParams->DynamicRangeDb; }
+                else { gainDb = pParams->InitialGainDb + (1.0 - (t_rate - (s + a + s)) / std::max(1e-12, a)) * pParams->DynamicRangeDb; }
+                const double t_sim = std::chrono::duration<double>(now - wall_start).count();
+                std::cout << std::fixed << std::setprecision(6)
+                          << "[AWGN] status seg=" << segName
+                          << " freqShiftHz=" << freqHz
+                          << " gainDb=" << gainDb
+                          << " ppm=" << totalPpm
+                          << " t_sim=" << t_sim << " s"
+                          << " t_rate=" << t_rate << " s"
+                          << std::endl;
+                lastStatusDisplay = now;
+            }
+        }
     }
 }
 
+/**
+ * @brief Applies per-chunk carrier rotation and forwards floats to @ref ChannelSamplingClockOffset.
+ */
 void AWGNChannel::ApplyFrequencyOffset(void)
 {
     const unsigned int nComplex = static_cast<unsigned int>(TxOutputBatchSize / 2);
     std::vector<float> iBuf(nComplex);
     std::vector<float> qBuf(nComplex);
-    std::vector<float> interleaved;
+    FreqChunk chunk;
 
     while (!StopAll)
     {
@@ -253,31 +437,45 @@ void AWGNChannel::ApplyFrequencyOffset(void)
             cvFreqQData_.wait(lk, [&] { return StopAll || !freqQ_.empty(); });
             if (StopAll)
                 break;
-            interleaved = std::move(freqQ_.front());
+            chunk = std::move(freqQ_.front());
             freqQ_.pop_front();
             lk.unlock();
             cvFreqQSpace_.notify_one();
         }
 
-        if (interleaved.size() != static_cast<size_t>(TxOutputBatchSize))
+        if (chunk.interleaved.size() != static_cast<size_t>(TxOutputBatchSize))
             continue;
+
+        // Update time-varying impairments for this chunk.
+        objFreqOffset.SetFrequency(static_cast<Ipp64f>(chunk.freqHz));
+        samplingClockOffset_.UpdateTotalPpm(chunk.totalPpm);
+
+        // Publish current applied values (for GUI/status overlay).
+        currFreqHz_.store(chunk.freqHz, std::memory_order_relaxed);
+        currTotalPpm_.store(chunk.totalPpm, std::memory_order_relaxed);
+        currGainDb_.store(chunk.gainDb, std::memory_order_relaxed);
+        currSegment_.store(chunk.segment, std::memory_order_relaxed);
+        currTRate_.store(chunk.t_rate, std::memory_order_relaxed);
 
         for (unsigned int k = 0; k < nComplex; ++k)
         {
-            iBuf[k] = interleaved[2 * k];
-            qBuf[k] = interleaved[2 * k + 1];
+            iBuf[k] = chunk.interleaved[2 * k];
+            qBuf[k] = chunk.interleaved[2 * k + 1];
         }
         objFreqOffset.CreateOutputs(iBuf.data(), qBuf.data(), nComplex);
         for (unsigned int k = 0; k < nComplex; ++k)
         {
-            interleaved[2 * k] = iBuf[k];
-            interleaved[2 * k + 1] = qBuf[k];
+            chunk.interleaved[2 * k] = iBuf[k];
+            chunk.interleaved[2 * k + 1] = qBuf[k];
         }
 
-        samplingClockOffset_.EnqueueNoisyInterleaved(interleaved.data(), TxOutputBatchSize);
+        samplingClockOffset_.EnqueueNoisyInterleaved(chunk.interleaved.data(), TxOutputBatchSize);
     }
 }
 
+/**
+ * @brief Blocks until @c nShorts IQ shorts are available from @ref OutputBuffer (post-SCO).
+ */
 bool AWGNChannel::CopyOutputSamples(short* dst, int nShorts, bool& stopAll)
 {
     std::unique_lock<std::mutex> lk(mtxOutputBuffer_);

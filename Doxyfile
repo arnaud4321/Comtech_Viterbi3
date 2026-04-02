@@ -1,0 +1,45 @@
+# Doxyfile — Comtech Viterbi3 (generated for maintainers)
+
+PROJECT_NAME           = "Comtech Viterbi3"
+PROJECT_BRIEF          = "Multithreaded QPSK receive-chain simulator with Viterbi decoding"
+
+USE_MDFILE_AS_MAINPAGE = docs/doxygen_mainpage.md
+OUTPUT_DIRECTORY       = docs/doxygen
+CREATE_SUBDIRS         = NO
+
+INPUT                  = src docs/doxygen_mainpage.md
+EXCLUDE                = src/json.hpp
+FILE_PATTERNS          = *.cpp *.h
+RECURSIVE              = NO
+
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+
+JAVADOC_AUTOBRIEF      = YES
+MULTILINE_CPP_IS_BRIEF = YES
+BUILTIN_STL_SUPPORT    = YES
+DISTRIBUTE_GROUP_DOC   = YES
+SORT_MEMBER_DOCS       = YES
+
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+# Render \f$…\f$, \f[…\f], etc. in HTML with MathJax (browser). Without this, Doxygen calls LaTeX to
+# build bitmap formulas — broken if latex is not installed (missing images + raw $…$ in the page).
+USE_MATHJAX            = YES
+MATHJAX_FORMAT         = SVG
+MATHJAX_RELPATH        = https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.7
+HTML_TIMESTAMP         = YES
+GENERATE_TREEVIEW      = YES
+SEARCHENGINE           = YES
+
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+ALPHABETICAL_INDEX     = YES
+
+WARN_IF_UNDOCUMENTED   = NO
+WARN_NO_PARAMDOC       = NO
+QUIET                  = NO

@@ -67,3 +67,15 @@ target_link_libraries(${PROJECT_NAME} uhd pthread boost_system boost_program_opt
 # Symlink so clangd finds compile_commands.json at repo root (Ctrl+F12)
 execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json
 	WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# API docs (Doxygen): cmake --build build --target doc
+find_program(DOXYGEN_EXECUTABLE NAMES doxygen DOC "Doxygen documentation generator")
+if(DOXYGEN_EXECUTABLE)
+	add_custom_target(doc
+		COMMAND ${DOXYGEN_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Doxyfile
+		WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+		COMMENT "Generating Doxygen HTML under docs/doxygen/html"
+		VERBATIM)
+else()
+	message(STATUS "Doxygen not found: optional target 'doc' unavailable")
+endif()

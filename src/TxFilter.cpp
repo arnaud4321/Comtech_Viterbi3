@@ -1,3 +1,8 @@
+/**
+ * @file TxFilter.cpp
+ * @brief Transmit pulse shaping: sqrt raised cosine via IPP FIR, @c TxNSS samples per symbol, configurable rolloff.
+ */
+
 #include "TxFilter.h"
 
 

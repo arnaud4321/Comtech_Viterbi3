@@ -1,3 +1,8 @@
+/**
+ * @file RxFilter.cpp
+ * @brief Receive matched filter: Intel IPP FIR @c ippsFIRSR on I/Q with same sqrt-RC taps as TX (normalized by @c K).
+ */
+
 #include "RxFilter.h"
 RxFilter::RxFilter(void)
 {

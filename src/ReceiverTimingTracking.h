@@ -1,3 +1,7 @@
+/**
+ * @file ReceiverTimingTracking.h
+ * @brief Thread: Gardner timing recovery from 2 sps stream → framed 1 sps symbols for downstream PLL/Viterbi.
+ */
 #pragma once
 
 #include "BufferFloat.h"
@@ -8,11 +12,17 @@
 #include <mutex>
 #include <thread>
 
-/// Dedicated thread: reads the filtered 2 sps stream, runs timing recovery (Gardner),
-/// and outputs 1 sps symbol frames (kSymFrame = ReceiverInputBatchIQSymbols) to the Viterbi manager.
-///
-/// Backpressure stress test: uncomment #define DEBUG_STRESS_BACKPRESSURE in ReceiverTimingTracking.cpp
-/// (adds an artificial delay each batch: slow consumer → resampler FIFO / filter ring backpressure).
+/**
+ * @brief Thread: 2 sps stream → @ref GardnerTiming → framed 1 sps symbols for PLL and @ref Viterbi.
+ *
+ * @details Reads @ref BufferFloat from the stage upstream of Gardner (after optional NCO/AGC), pushes
+ * samples through @ref GardnerTiming::ProcessBlock, and queues fixed-length frames of
+ * @c ReceiverInputBatchIQSymbols complex symbols. The Viterbi manager and @ref ReceiverPhaseTrackingDD
+ * block on @ref WaitPopSymbolFrame.
+ *
+ * **Debug:** uncomment @c DEBUG_STRESS_BACKPRESSURE in @c ReceiverTimingTracking.cpp to inject an
+ * artificial per-batch delay (stress backpressure into the resampler / filter ring).
+ */
 class ReceiverTimingTracking
 {
 public:
@@ -22,13 +32,16 @@ public:
     void ResetGardner(double nominalRatio, double kp, double ki, int lockAvg);
 
     void Start(BufferFloat* filterRing, std::mutex* mtxFilterRing,
-               std::condition_variable* cvFilterData, bool* stopAll);
+               std::condition_variable* cvFilterData, bool* stopAll,
+               double displayPeriodSec = 1.0);
 
     void StopJoin();
 
     /// Blocks until a full frame is available or shutdown. Copies nSym symbols into dstI/dstQ; false if stopped with no frame.
     bool WaitPopSymbolFrame(float* dstI, float* dstQ, int nSym);
     bool IsLocked() const { return locked_.load(std::memory_order_relaxed); }
+    double GetGardnerOmega() const { return gardner_.GetOmega(); }
+    double GetGardnerOmegaNom() const { return gardner_.GetOmegaNom(); }
 
     void ThreadMain();
 
@@ -67,6 +80,7 @@ private:
 
     std::thread thread_;
     bool threadRunning_ = false;
+    double displayPeriodSec_ = 1.0;
 
     bool pushOneFrameToQueue(const float* i, const float* q);
 };

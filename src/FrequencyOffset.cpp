@@ -1,3 +1,10 @@
+/**
+ * @file FrequencyOffset.cpp
+ * @brief Complex NCO: 48-bit phase accumulator, LUT cos/sin, per-sample rotation @c CreateOutputs (in-place I/Q).
+ *
+ * @details @c SetFrequency updates phase increment per sample; optional @c SetAcceleration for chirp-style tests.
+ */
+
 #include "FrequencyOffset.h"
 #include <cstdint>
 

@@ -1,3 +1,7 @@
+/**
+ * @file ReceiverPhaseTrackingDD.h
+ * @brief Decision-directed carrier phase tracking (2nd-order PLL) after Gardner.
+ */
 #pragma once
 
 #include "ReceiverTimingTracking.h"
@@ -18,8 +22,14 @@
 // - phase_dd_thresh.bin   (float32 lock threshold in rad, per symbol)
 // #define DEBUG_PHASE_DD
 
-/// Decision-directed carrier phase tracking (QPSK) as a dedicated block after timing recovery.
-/// Implements a 2nd-order PLL (phase + frequency integrator) with a DD phase error detector.
+/**
+ * @brief Decision-directed carrier phase tracking (QPSK) after @ref ReceiverTimingTracking.
+ *
+ * @details Per symbol: derotate @f$(I,Q)@f$ with LUT → @f$(z_{rI},z_{rQ})@f$; QPSK slice @f$\pm1@f$.
+ * @f$e=\mathrm{atan2}(z_{rQ}d_i-z_{rI}d_q,\, z_{rI}d_i+z_{rQ}d_q)@f$ (= @c dd_phase_error). Then @c freqRadPerSym_ plus @c ki_ times @f$e@f$;
+ * @c phaseRad_ plus @c freqRadPerSym_ plus @c kp_ times @f$e@f$, wrapped to @f$(-\pi,\pi]@f$; @c outI/outQ store current derotated @f$z_r@f$.
+ * Lock when EMA of @f$|e|@f$ stays below @c lockThresholdRad_ for @c lockCountRequired_ symbols. Delock can re-enable VIVA in @ref ReceiverFreqCorrector.
+ */
 class ReceiverPhaseTrackingDD
 {
 public:
@@ -28,7 +38,8 @@ public:
 
     /// Start the phase-tracking thread.
     /// Input is pulled from timingTracking (WaitPopSymbolFrame).
-    void Start(ReceiverTimingTracking* timingTracking, bool* stopAll);
+    void Start(ReceiverTimingTracking* timingTracking, bool* stopAll,
+               double displayPeriodSec = 1.0);
 
     void StopJoin();
 
@@ -37,6 +48,7 @@ public:
     bool WaitPopSymbolFrame(float* dstI, float* dstQ, int nSym);
 
     bool IsLocked() const { return locked_.load(std::memory_order_relaxed); }
+    double GetLastFreqEstHz() const { return lastFreqEstHz_.load(std::memory_order_relaxed); }
 
     void ThreadMain();
 
@@ -68,6 +80,7 @@ private:
     int lockCount_ = 0;
     int lockCountRequired_ = 10 * kSymFrame; // ~10 frames worth of symbols
     std::atomic<bool> locked_{false};
+    std::atomic<double> lastFreqEstHz_{0.0};
 
     // Phase rotator LUT (cos/sin table)
     static constexpr int kLutSize = 16384;
@@ -85,6 +98,7 @@ private:
 
     std::thread thread_;
     bool threadRunning_ = false;
+    double displayPeriodSec_ = 1.0;
 
     bool pushOneFrameToQueue(const float* i, const float* q);
 

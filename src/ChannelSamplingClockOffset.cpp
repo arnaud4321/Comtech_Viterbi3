@@ -1,3 +1,13 @@
+/**
+ * @file ChannelSamplingClockOffset.cpp
+ * @brief Async resampling thread: float IQ in → Lagrange ring at @f$F_s(1+\mathrm{ppm}\cdot10^{-6})@f$ → shorts to @c OutputBuffer.
+ *
+ * @details **EnqueueNoisyInterleaved** — After NCO rotation: pushes @c TxOutputBatchSize floats into the input
+ * queue. **ThreadMain** — Ring + @c tScoAbs with @c step = @f$1/(1+\varepsilon)@f$, Lagrange-4 outputs,
+ * latency warmup, safe-band checks, then @c FloatBatchToShortsInterleaved → @c BufferShort.
+ * **Configure/UpdateTotalPpm** — Set @f$\varepsilon@f$ and the atomic @c step_.
+ */
+
 #include "ChannelSamplingClockOffset.h"
 #include <algorithm>
 #include <cassert>
@@ -88,8 +98,14 @@ ChannelSamplingClockOffset::~ChannelSamplingClockOffset()
 void ChannelSamplingClockOffset::Configure(double totalPpm)
 {
     totalPpm_ = totalPpm;
+    UpdateTotalPpm(totalPpm);
+}
+
+void ChannelSamplingClockOffset::UpdateTotalPpm(double totalPpm)
+{
+    totalPpm_ = totalPpm;
     const double eps = totalPpm_ * 1.0e-6;
-    step_ = 1.0 / (1.0 + eps);
+    step_.store(1.0 / (1.0 + eps), std::memory_order_relaxed);
 }
 
 void ChannelSamplingClockOffset::Start(BufferShort* outputBuffer, std::mutex* outputMutex,
@@ -138,6 +154,9 @@ void ChannelSamplingClockOffset::EnqueueNoisyInterleaved(const float* interleave
     cvInData_.notify_one();
 }
 
+/**
+ * @brief SCO worker: dequeue float batches, resample ring, write shorts to @c OutputBuffer.
+ */
 void ChannelSamplingClockOffset::ThreadMain()
 {
     alignas(32) float deintI[kComplexPerBatch];
@@ -185,7 +204,7 @@ void ChannelSamplingClockOffset::ThreadMain()
 
         scoRing.PushBlock(deintI, deintQ, nC);
 
-        const double step = step_;
+        const double step = step_.load(std::memory_order_relaxed);
 
         int scoOutLen = 0;
         if (!scoInit)

@@ -1,3 +1,7 @@
+/**
+ * @file Transmitter.h
+ * @brief Multithreaded QPSK-oriented transmitter: source data, coding, scrambling, pulse shaping.
+ */
 #pragma once
 #include <immintrin.h>
 #include <thread>
@@ -15,7 +19,24 @@ using namespace std;
 
 //#define DEBUG_TX
 
-
+/**
+ * @brief Transmit chain from bits to band-limited IQ floats consumed by @ref AWGNChannel.
+ *
+ * @details **Data path (conceptual):**
+ * - **Source:** PRBS-23 or file bytes; mapped to uncoded bits for the parallel trellis branches.
+ * - **Scrambling:** ITU-T V.35 self-synchronous scrambler (@ref SelfSyncScrambler_V35) on the data stream.
+ * - **Split:** @c Split3() reorganizes scrambled bytes into three parallel bit-packed streams so each
+ *   @ref ConvEncoder / @ref Viterbi branch corresponds to a different alignment hypothesis at the receiver.
+ * - **Differential encoding:** @ref DiffEncode on each branch before convolution.
+ * - **Convolutional coding:** Three @ref ConvEncoder instances (rate 1/2, K=7-style polynomials); outputs
+ *   are multiplexed to the pulse shaper as interleaved I/Q symbol triples.
+ * - **Pulse shaping:** @ref TxFilter (root raised cosine, configurable roll-off); output is complex
+ *   baseband at the simulation sample rate, queued for the channel.
+ *
+ * **Threads (see @ref Transmitter.cpp):** @c GenerateData — scrambler, @c Split3, @c DiffEncode per branch,
+ * @c ConvEncoder, hand-off via @c DataQ. @c FilterData — maps coded bits to @f$\pm1@f$, @ref TxFilter, interleaved
+ * float batches into @c FilterQ for @c CopyOutputSamples / @ref AWGNChannel.
+ */
 class Transmitter
 {
     private:

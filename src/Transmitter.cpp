@@ -1,3 +1,18 @@
+/**
+ * @file Transmitter.cpp
+ * @brief Multithreaded TX path: scramble → three parallel branches (split/diff/conv) → RRC pulse shaping.
+ *
+ * @details **Threads**
+ * - **GenerateData** — Ring @c DataQ: V35 scrambler on source bytes, @c Split3 into three packed streams,
+ *   @c DiffEncode and @c ConvEncode per branch, enqueue one coded slot per batch for the filter thread.
+ * - **FilterData** — Dequeue coded slot, map bits to @f$\pm1@f$, build interleaved I/Q for @ref TxFilter
+ *   (root raised cosine, @c TxNSS samples per symbol), enqueue float batches in @c FilterQ consumed via
+ *   @c CopyOutputSamples by @ref AWGNChannel.
+ *
+ * **StartThreads** builds PRBS or loads @c FileName into @c Data, calls @c oTxFilter.CreateObjects(RollOff),
+ * resets queues, starts both workers. **StopThreads** signals @c StopAll, joins threads, frees @c Data.
+ */
+
 #include "Transmitter.h"
 #include <cstring>
 extern mutex mtxfilethr;
@@ -86,6 +101,9 @@ void Transmitter::StopThreads(void)
     _mm_free(Data);
 }
 
+/**
+ * @brief Scramble/split/diff/conv pipeline → @c DataQ for @c FilterData.
+ */
 void Transmitter::GenerateData(void)
 {
 
@@ -143,6 +161,9 @@ void Transmitter::GenerateData(void)
 
 }
 
+/**
+ * @brief Map coded bits to symbols, @ref TxFilter, write @c FilterQ / @c TxOut FIFO.
+ */
 void Transmitter::FilterData(void)
 {
  #ifdef WRITE_LOG_THR

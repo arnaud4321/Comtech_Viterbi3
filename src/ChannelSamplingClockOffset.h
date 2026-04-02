@@ -1,3 +1,7 @@
+/**
+ * @file ChannelSamplingClockOffset.h
+ * @brief Optional Rx sampling-clock error: resample Tx/channel stream by @f$(1+\mathrm{ppm}\cdot10^{-6})@f$.
+ */
 #pragma once
 
 #include "BufferShort.h"
@@ -5,12 +9,31 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <atomic>
 #include <thread>
 #include <vector>
 
-/// Resamples the 2×Fs complex stream to emulate a sampling-clock offset on the receive path:
-/// output at effective Fs·(1 + ppm·10⁻⁶) relative to the input.
-/// +ppm means a faster Rx clock (same convention as the former Gardner-input SCO).
+/**
+ * @brief Emulates receiver clock error by asynchronous resampling of the complex baseband stream.
+ *
+ * @details **Input path:** @ref EnqueueNoisyInterleaved appends one @c TxOutputBatchSize interleaved-float
+ * batch to a bounded queue (@c kInputQueueDepth); the worker dequeues, de-interleaves to I/Q, and
+ * @c PushBlock into a large ring (@c ScoRingBuffer, power-of-two length).
+ *
+ * **Time step:** @c UpdateTotalPpm sets @f$\varepsilon=\mathrm{ppm}\cdot10^{-6}@f$ and stores
+ * @f$\texttt{step}=1/(1+\varepsilon)@f$ in an atomic (read each batch in @c ThreadMain). The fractional
+ * read cursor @c tScoAbs advances by @c step per **output** sample; average output rate is
+ * @f$F_s(1+\varepsilon)@f$ vs input @f$F_s@f$ (positive ppm ⇒ more output samples per wall-clock time).
+ *
+ * **Interpolation / startup:** After enough input has accumulated, @c tScoAbs is initialized with a fixed
+ * lag (@c latencySamples = @c kComplexPerBatch·64) behind the newest ring index so Lagrange-4 has margin.
+ * Each output uses @c InterpLagrange4I/Q at @c tScoAbs; if the cursor leaves a safe band inside the ring,
+ * the lag state is dropped until warmup completes again.
+ *
+ * **Output:** @c FloatBatchToShortsInterleaved applies @c lrintf and clamps to int16; results go to the shared
+ * @c BufferShort like the rest of the channel. Distinct from Gardner recovery, which acts on **symbol**
+ * timing after matched filtering in @ref Receiver.
+ */
 class ChannelSamplingClockOffset
 {
 public:
@@ -18,6 +41,7 @@ public:
     ~ChannelSamplingClockOffset();
 
     void Configure(double totalPpm);
+    void UpdateTotalPpm(double totalPpm);
 
     /// Output buffer shared with CopyOutputSamples (same mutex and condition variables as the channel).
     void Start(BufferShort* outputBuffer, std::mutex* outputMutex,
@@ -54,7 +78,7 @@ private:
     };
 
     double totalPpm_ = 0.0;
-    double step_ = 1.0;
+    std::atomic<double> step_{1.0};
 
     BufferShort* pOutBuf_ = nullptr;
     std::mutex* pOutMtx_ = nullptr;

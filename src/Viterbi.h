@@ -1,24 +1,42 @@
+/**
+ * @file Viterbi.h
+ * @brief AVX2-accelerated Viterbi decoder (rate 1/2, K=7 trellis, polynomials 0171/0133).
+ */
 #pragma once
 #include <immintrin.h>
 #include <cstdint>
 
 #define MAX_BURST_LENGTH 65536
 #define AVX2_CODE
+
+/**
+ * @brief Soft-decision Viterbi decoder instance (one of three parallel hypotheses in @ref Receiver).
+ *
+ * @details **Trellis:** rate @f$1/2@f$, constraint length @f$K@f$ (implementation uses polynomials and
+ * tables built at construction). **Branch metrics** compare received soft I/Q to expected constellation
+ * points for each transition; **ACS** (add-compare-select) updates path metrics with SIMD (@c AcsAll /
+ * @c AcsAllNew). **Traceback** reads survivor memory to emit decoded bits. Members @c DiffPunc / @c DiffPuncLength
+ * are reserved for puncturing/depuncturing but are **not populated** in the current constructor path.
+ *
+ * @ref Receiver runs three decoders on phase-shifted input streams; the manager compares **four metric probes**
+ * (@c ExchangeIQ / sign combinations) before lock, then a single aligned decode; then differential decode,
+ * PRBS sync, and descrambling.
+ */
 class Viterbi
 {
 	
 
 
 protected:
-	float *BranchMetrics;
-	__m128i *mDecsMask;
-	__m256i *mArranged;
-	__m128i *mPermCalc;
-	__m256i *mOffset;
+	float *BranchMetrics = nullptr;
+	__m128i *mDecsMask = nullptr;
+	__m256i *mArranged = nullptr;
+	__m128i *mPermCalc = nullptr;
+	__m256i *mOffset = nullptr;
 	//Branch Metrics Calculation
 
 	int NumTransitions;
-	int *AllBinVecs; // Auxiliary matrix containing all n-tuples vector
+	int *AllBinVecs = nullptr; // Auxiliary matrix containing all n-tuples vector
 	int CLengthM1, FirstTracebackPeriod;
 	//Depuncturing
 
@@ -28,7 +46,9 @@ protected:
 	unsigned int OutputCtr; //Counter of the length of the output
 	//float *DepuncOutputBuffer;
 
-	unsigned int FirstPositionPunc, *DiffPunc, DiffPuncLength;
+	unsigned int FirstPositionPunc = 0;
+	unsigned int *DiffPunc = nullptr;
+	unsigned int DiffPuncLength = 0;
 
 
 	//Private Methods
@@ -36,7 +56,7 @@ protected:
 	void generate_binvecs(void);
 	void dec2bin(int index, int *v, int length);
 
-	unsigned int *ivecGenPolys; 
+	unsigned int *ivecGenPolys = nullptr; 
 	unsigned int intCLength; //Constraint Length
 	unsigned int intNParam; //the n parameter of 1/n
 	unsigned int intMaxDataLen; // The Maximal Output Decoded Data Length (does not include the tail bits)
@@ -49,10 +69,11 @@ protected:
 	unsigned int intSurvMemWrRowAddr;
 	unsigned int MaskSurv;
 	unsigned int intNumDecodedBits; //Number of Bits that had been decoded 
-	float *vecPathMetMem, *TempVec; //Path Metrics Memory Vector
+	float *vecPathMetMem = nullptr;
+	float *TempVec = nullptr; //Path Metrics Memory Vector
 	__m128i PathMet[8];
-	uint64_t *bmatSurvMem;  //Survivor Memory Matrix
-	int *imatDecodingTable;
+	uint64_t *bmatSurvMem = nullptr;  //Survivor Memory Matrix
+	int *imatDecodingTable = nullptr;
 	unsigned char *bvecDecodedBits;
 
 	//Private Functions

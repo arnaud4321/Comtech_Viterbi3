@@ -1,3 +1,7 @@
+/**
+ * @file RxFilter.h
+ * @brief Receive matched filter: same sqrt-RC @c ippsFIRSR structure as @ref TxFilter, gain @c K = 1/8192.
+ */
 #pragma once
 #include "TxFilter.h"
 class RxFilter: public TxFilter

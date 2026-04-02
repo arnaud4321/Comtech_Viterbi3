@@ -1,3 +1,13 @@
+/**
+ * @file ReceiverResampler.cpp
+ * @brief Worker thread: drain @c oBufferFilter → internal FIFO → @ref Resampler::CreateOutputs → downstream ring.
+ *
+ * @details **ThreadMain** — While running: refill FIFO from input ring up to @c kFifoMax (else block on
+ * @c inCvData_ — backpressure). Calls @c resampler_ with atomic @c advance_ from
+ * @ref ReceiverResampler::UpdateFromSymbolRateHz. Pushes output blocks to @c outRing_, notifies @c outCvData_.
+ * @c UpdateFromSymbolRateHz sets @f$a \approx F_s^{\mathrm{in}}/(2R_s)@f$ clamped to @f$[0.5,2]@f$.
+ */
+
 #include "ReceiverResampler.h"
 #include <algorithm>
 #include <cassert>
@@ -56,8 +66,7 @@ void ReceiverResampler::StopJoin()
     outMtx_ = nullptr;
     outCvData_ = nullptr;
     outCvSpace_ = nullptr;
-    stopAll_ = nullptr;
-}
+    stopAll_ = nullptr;}
 
 void ReceiverResampler::UpdateFromSymbolRateHz(double symbolRateHz)
 {
@@ -71,6 +80,9 @@ void ReceiverResampler::UpdateFromSymbolRateHz(double symbolRateHz)
     advance_.store(a, std::memory_order_relaxed);
 }
 
+/**
+ * @brief Resampler loop: bounded FIFO, Lagrange outputs, write to @c outRing_.
+ */
 void ReceiverResampler::ThreadMain()
 {
     constexpr int kReadChunk = SPB;
@@ -103,7 +115,7 @@ void ReceiverResampler::ThreadMain()
                     const auto now = std::chrono::steady_clock::now();
                     if (now - lastFifoFullLog >= std::chrono::seconds(1))
                     {
-                        std::cerr << "[ReceiverResampler] Internal FIFO at cap " << fifoUsed << "/" << kFifoMax
+                        std::cout << "[ReceiverResampler] Internal FIFO at cap " << fifoUsed << "/" << kFifoMax
                                   << " samples; pausing drain of input ring (pending "
                                   << inRing_->GetSizeInBuffer() << " samples in ring)." << std::endl;
                         lastFifoFullLog = now;
