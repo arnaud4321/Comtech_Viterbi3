@@ -37,12 +37,51 @@
 #include <cstdio>
 #include <cstring>
 #include <cassert>
+#include <limits>
 #include <sys/stat.h>
 
 extern std::mutex mtxfilethr;
 
 // Forward declaration: used in OperateViterbiManager before the definition further below.
 static void InjectPRBSErrorDeterministic(unsigned char* buf, int length);
+
+namespace
+{
+/** RMS EVM vs QPSK hard decisions scaled to the frame mean power; @c snrFromEvmDb = -20*log10(EVM_rms). */
+void QpskEvmSnrFromFrame(const float* i, const float* q, int n, double& evmRms, double& snrFromEvmDb)
+{
+    if (!i || !q || n <= 0)
+    {
+        evmRms = 0.0;
+        snrFromEvmDb = 0.0;
+        return;
+    }
+    double sumI2 = 0.0, sumQ2 = 0.0;
+    for (int k = 0; k < n; ++k)
+    {
+        sumI2 += static_cast<double>(i[k]) * i[k];
+        sumQ2 += static_cast<double>(q[k]) * q[k];
+    }
+    const double meanP = (sumI2 + sumQ2) / static_cast<double>(n);
+    const double R = std::sqrt(std::max(meanP * 0.5, 1e-30));
+    double errSum = 0.0, sigSum = 0.0;
+    for (int k = 0; k < n; ++k)
+    {
+        const double di = (i[k] >= 0.0f) ? 1.0 : -1.0;
+        const double dq = (q[k] >= 0.0f) ? 1.0 : -1.0;
+        const double si = di * R;
+        const double sq = dq * R;
+        const double ei = static_cast<double>(i[k]) - si;
+        const double eq = static_cast<double>(q[k]) - sq;
+        errSum += ei * ei + eq * eq;
+        sigSum += si * si + sq * sq;
+    }
+    const double sigMean = sigSum / static_cast<double>(n);
+    const double errMean = errSum / static_cast<double>(n);
+    evmRms = std::sqrt(errMean / std::max(sigMean, 1e-30));
+    snrFromEvmDb = -20.0 * std::log10(std::max(evmRms, 1e-15));
+}
+} // namespace
 
 Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB),OutputQ(LengthQueue)
 {
@@ -632,6 +671,7 @@ void Receiver::OperateViterbiManager(void)
                 double chanGainDb = 0.0;
                 int chanSeg = 0;
                 double chanTRate = 0.0;
+                double chanEsN0Db = std::numeric_limits<double>::quiet_NaN();
                 if (pChannel_)
                 {
                     const auto s = pChannel_->GetCurrentApplied();
@@ -640,22 +680,28 @@ void Receiver::OperateViterbiManager(void)
                     chanGainDb = s.GainDb;
                     chanSeg = s.Segment;
                     chanTRate = s.TRate;
+                    chanEsN0Db = pChannel_->GetEsN0Db();
                 }
 
-                char extra[512];
+                double evmRms = 0.0, snrFromEvmDb = 0.0;
+                QpskEvmSnrFromFrame(pendingI, pendingQ, kSymFrame, evmRms, snrFromEvmDb);
+
+                char extra[768];
                 std::snprintf(extra, sizeof(extra),
                               "symRateMsps=%.6f symRatePpm=%.3f gardLocked=%d phaseLocked=%d vitLocked=%d prbsLocked=%d "
                               "symRateCorrPpm=%.3f gardnerPpm=%.3f rxTotalPpmCorr=%.3f "
                               "numBits=%llu numErrors=%llu ber=%.6e "
                               "samplerMsps=%.3f rxFilterMsps=%.3f "
                               "centralReady=%d centralTargetHz=%.3f centralNcoHz=%.3f gainDb=%.3f phaseFreqHz=%.3f "
-                              "chanFreqHz=%.3f chanTotalPpm=%.6f chanGainDb=%.3f chanSeg=%d chanTRate=%.3f",
+                              "chanFreqHz=%.3f chanTotalPpm=%.6f chanGainDb=%.3f chanSeg=%d chanTRate=%.3f "
+                              "chanEsN0Db=%.2f evmRms=%.6f snrFromEvmDb=%.2f",
                               symRateMsps, symRatePpm, gardLocked, phaseLocked, vitLocked, prbsLocked,
                               symRateCorrPpm, gardnerPpm, rxTotalPpmCorr,
                               numBits, numErrors, ber,
                               samplerMsps, rxFilterMsps,
                               centralReady, centralTargetHz, centralNcoHz, gainDb, phaseFreqHz,
-                              chanFreqHz, chanTotalPpm, chanGainDb, chanSeg, chanTRate);
+                              chanFreqHz, chanTotalPpm, chanGainDb, chanSeg, chanTRate, chanEsN0Db, evmRms,
+                              snrFromEvmDb);
 
                 constellationDisplay_->UpdateEx(pendingI, pendingQ, kSymFrame, t_sim, t_rate, std::string(extra));
                 lastConstellationDisplay = now;

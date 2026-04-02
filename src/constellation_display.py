@@ -2,6 +2,7 @@ import sys
 import select
 import os
 import time
+import math
 import traceback
 from pathlib import Path
 
@@ -83,7 +84,7 @@ try:
 except Exception:
     pass
 
-fig.subplots_adjust(left=0.06, right=0.99, top=0.93, bottom=0.08, wspace=0.06, hspace=0.22)
+fig.subplots_adjust(left=0.06, right=0.99, top=0.94, bottom=0.09, wspace=0.06, hspace=0.32)
 
 # Layout:
 # - Top: constellation (left) + state/status (right)
@@ -91,7 +92,7 @@ fig.subplots_adjust(left=0.06, right=0.99, top=0.93, bottom=0.08, wspace=0.06, h
 gs = fig.add_gridspec(
     nrows=2,
     ncols=2,
-    height_ratios=[3.4, 1.25],
+    height_ratios=[3.75, 1.12],
     width_ratios=[4.0, 2.4],
 )
 ax = fig.add_subplot(gs[0, 0])
@@ -112,14 +113,15 @@ ax.set_aspect("equal", adjustable="box")
 ax_info.set_axis_off()
 info_text = ax_info.text(
     0.02,
-    0.98,
+    1.02,
     "",
     transform=ax_info.transAxes,
     va="top",
     ha="left",
-    fontsize=9,
+    fontsize=8.5,
     family="monospace",
-    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.9),
+    clip_on=False,
+    bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="black", alpha=0.9),
 )
 
 
@@ -300,13 +302,22 @@ while True:
             if "chanGainDb" in kv or "chanRangeDb" in kv:
                 v = kv.get("chanGainDb", kv.get("chanRangeDb", ""))
                 chan_lines.append(f"gainDb  = {v}")
+            if "chanEsN0Db" in kv:
+                try:
+                    v = float(kv["chanEsN0Db"])
+                    if math.isfinite(v):
+                        chan_lines.append(f"Es/N0   = {v:.2f} dB (config)")
+                except Exception:
+                    pass
             if "samplerMsps" in kv:
                 chan_lines.append(f"samplerMsps = {kv['samplerMsps']}")
 
             rx_lines = ["", "[Receiver]"]
             for key, label in [
                 ("symRateMsps", "symRateMsps"),
-                ("symRatePpm", "symRatePpm"),
+                ("symRateCorrPpm", "symRateCorrPpm"),
+                ("gardnerPpm", "gardnerPpm"),
+                ("rxTotalPpmCorr", "rxTotalPpmCorr"),
                 ("gardLocked", "gardLocked"),
                 ("phaseLocked", "phaseLocked"),
                 ("vitLocked", "vitLocked"),
@@ -328,6 +339,15 @@ while True:
                     elif key == "centralReady":
                         val = fmt_ready_status(val)
                     rx_lines.append(f"{label:14s}= {val}")
+            if "evmRms" in kv and "snrFromEvmDb" in kv:
+                try:
+                    er = float(kv["evmRms"])
+                    snr_e = float(kv["snrFromEvmDb"])
+                    if er == er and snr_e == snr_e:
+                        rx_lines.append(f"{'EVM_rms':14s}= {er:.6f} (frame)")
+                        rx_lines.append(f"{'SNR_est':14s}= {snr_e:.2f} dB (EVM)")
+                except Exception:
+                    pass
             info_text.set_text("\n".join(chan_lines + rx_lines))
 
         # History lines (no relim/autoscale every frame; update limits at low rate)

@@ -148,5 +148,8 @@ public:
         s.TRate = currTRate_.load(std::memory_order_relaxed);
         return s;
     }
+
+    /** @brief Configured Es/N0 (dB) from @ref Params (if set), else last value from @ref StartThreads. */
+    double GetEsN0Db() const { return pParams ? pParams->EsN0 : EsN0db; }
 };
 
