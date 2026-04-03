@@ -36,7 +36,9 @@
 #include <atomic>
 extern std::atomic<bool> Finish;
 extern mutex mtxfilethr;
-AWGNChannel::AWGNChannel(unsigned int Seed):NoiseQ(LengthQueue),OutputBuffer(128*TxOutputBatchSize,2*TxOutputBatchSize)
+AWGNChannel::AWGNChannel(unsigned int Seed)
+    : NoiseQ(LengthQueue)
+    , OutputBuffer(kChannelOutShortRingSize, kChannelOutShortRingExtra)
 {
     // NoiseBatchSize: slightly > one TX batch so slowed-time runs do not run out of noise; 16-aligned for AVX loops.
     oNoiseGen.set_seed(Seed);

@@ -9,10 +9,14 @@
  */
 
 #include "ChannelSamplingClockOffset.h"
+#include "ConsoleAlert.h"
+#include "Lagrange4Simd.h"
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 
 void ChannelSamplingClockOffset::ScoRingBuffer::PushBlock(const float* inI, const float* inQ, int n)
 {
@@ -44,34 +48,14 @@ float ChannelSamplingClockOffset::ScoRingBuffer::InterpLagrange4I(double t) cons
 {
     const long long k = static_cast<long long>(std::floor(t));
     const double mu = t - static_cast<double>(k);
-    const float x0 = GetI(k - 1);
-    const float x1 = GetI(k + 0);
-    const float x2 = GetI(k + 1);
-    const float x3 = GetI(k + 2);
-
-    const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
-    const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
-    const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
-    const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
-
-    return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3);
+    return Lagrange4Simd::EvalSet_ps(GetI(k - 1), GetI(k + 0), GetI(k + 1), GetI(k + 2), Lagrange4Simd::Coeffs_ps(mu));
 }
 
 float ChannelSamplingClockOffset::ScoRingBuffer::InterpLagrange4Q(double t) const
 {
     const long long k = static_cast<long long>(std::floor(t));
     const double mu = t - static_cast<double>(k);
-    const float x0 = GetQ(k - 1);
-    const float x1 = GetQ(k + 0);
-    const float x2 = GetQ(k + 1);
-    const float x3 = GetQ(k + 2);
-
-    const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
-    const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
-    const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
-    const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
-
-    return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3);
+    return Lagrange4Simd::EvalSet_ps(GetQ(k - 1), GetQ(k + 0), GetQ(k + 1), GetQ(k + 2), Lagrange4Simd::Coeffs_ps(mu));
 }
 
 void ChannelSamplingClockOffset::FloatBatchToShortsInterleaved(const float* iPtr, const float* qPtr,
@@ -145,6 +129,18 @@ void ChannelSamplingClockOffset::EnqueueNoisyInterleaved(const float* interleave
     if (!pStopAll_ || !threadRunning_)
         return;
     std::unique_lock<std::mutex> lk(mtxIn_);
+    static auto lastScoInFifoSatLog = std::chrono::steady_clock::now();
+    if (inQueue_.size() >= kInputQueueDepth)
+    {
+        const auto nowSat = std::chrono::steady_clock::now();
+        if (nowSat - lastScoInFifoSatLog >= std::chrono::seconds(1))
+        {
+            lastScoInFifoSatLog = nowSat;
+            CONSOLE_ALERT_STMT(std::cout << ConsoleAlert::kRedOpen << "[SCO] input FIFO saturated; depth="
+                                         << inQueue_.size() << "/" << kInputQueueDepth
+                                         << " batches (producer blocked)" << ConsoleAlert::kReset << std::endl;);
+        }
+    }
     cvInSpace_.wait(lk, [&] {
         return (pStopAll_ && *pStopAll_) || inQueue_.size() < kInputQueueDepth;
     });
@@ -170,6 +166,8 @@ void ChannelSamplingClockOffset::ThreadMain()
 
     const long long latencySamples = static_cast<long long>(kComplexPerBatch) * 64LL;
     assert(latencySamples + 16 < ScoRingBuffer::kSize);
+
+    auto lastShortOutSatLog = std::chrono::steady_clock::now();
 
     for (;;)
     {
@@ -244,8 +242,12 @@ void ChannelSamplingClockOffset::ThreadMain()
                 for (int n = 0; n < scoOutLen; ++n)
                 {
                     const double t = tScoAbs;
-                    scoChunkI[n] = scoRing.InterpLagrange4I(t);
-                    scoChunkQ[n] = scoRing.InterpLagrange4Q(t);
+                    const long long k = static_cast<long long>(std::floor(t));
+                    const double mu = t - static_cast<double>(k);
+                    Lagrange4Simd::EvalIQ_ps(scoRing.GetI(k - 1), scoRing.GetI(k + 0), scoRing.GetI(k + 1),
+                                             scoRing.GetI(k + 2), scoRing.GetQ(k - 1), scoRing.GetQ(k + 0),
+                                             scoRing.GetQ(k + 1), scoRing.GetQ(k + 2), mu, &scoChunkI[n],
+                                             &scoChunkQ[n]);
                     tScoAbs += step;
                 }
             }
@@ -257,7 +259,18 @@ void ChannelSamplingClockOffset::ThreadMain()
         const int nShorts = 2 * scoOutLen;
         std::unique_lock<std::mutex> lkOut(*pOutMtx_);
         while (pStopAll_ != nullptr && !*pStopAll_ && pOutBuf_->AlmostFull())
+        {
+            const auto nowSat = std::chrono::steady_clock::now();
+            if (nowSat - lastShortOutSatLog >= std::chrono::seconds(1))
+            {
+                lastShortOutSatLog = nowSat;
+                CONSOLE_ALERT_STMT(std::cout << ConsoleAlert::kRedOpen
+                                             << "[SCO] AWGN output short ring almost full; fill="
+                                             << pOutBuf_->GetSizeInBuffer() << "/" << pOutBuf_->GetBufferSize() - 1
+                                             << ConsoleAlert::kReset << std::endl;);
+            }
             pCvSpace_->wait(lkOut);
+        }
         if (pStopAll_ != nullptr && *pStopAll_)
             continue;
 

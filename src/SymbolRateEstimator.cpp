@@ -10,6 +10,7 @@
  */
 
 #include "SymbolRateEstimator.h"
+#include "Lagrange4Simd.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,22 +28,6 @@ inline int ClampIndex(int x, int lo, int hi)
     return std::max(lo, std::min(hi, x));
 }
 
-inline float InterpLagrange4(const float* x, int len, double t)
-{
-    int k = static_cast<int>(std::floor(t));
-    k = ClampIndex(k, 1, len - 3);
-    const double mu = t - static_cast<double>(k);
-    const float x0 = x[k - 1];
-    const float x1 = x[k + 0];
-    const float x2 = x[k + 1];
-    const float x3 = x[k + 2];
-
-    const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
-    const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
-    const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
-    const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
-    return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3);
-}
 } // namespace
 
 SymbolRateEstimator::SymbolRateEstimator()
@@ -200,8 +185,11 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
         for (int n = 0; n < NfftOs; ++n)
         {
             const double t = static_cast<double>(n) * scale;
-            BufferOsI[n] = InterpLagrange4(BufferI.data(), Nfft, t);
-            BufferOsQ[n] = InterpLagrange4(BufferQ.data(), Nfft, t);
+            int k = static_cast<int>(std::floor(t));
+            k = ClampIndex(k, 1, Nfft - 3);
+            const double mu = t - static_cast<double>(k);
+            Lagrange4Simd::EvalIQContiguous_ps(BufferI.data() + k - 1, BufferQ.data() + k - 1, mu, &BufferOsI[n],
+                                               &BufferOsQ[n]);
         }
         inI = BufferOsI.data();
         inQ = BufferOsQ.data();

@@ -9,6 +9,7 @@
  */
 
 #include "ReceiverResampler.h"
+#include "ConsoleAlert.h"
 #include <algorithm>
 #include <cassert>
 #include <chrono>
@@ -88,6 +89,8 @@ void ReceiverResampler::ThreadMain()
     constexpr int kReadChunk = SPB;
     constexpr int kOutBlockMax = SPB * 2; // worst-case upsampling (Advance=0.5)
     auto lastFifoFullLog = std::chrono::steady_clock::now();
+    auto lastOutRingFullLog = std::chrono::steady_clock::now();
+    auto lastOutCommitBlockLog = std::chrono::steady_clock::now();
 
     alignas(32) float outI[kOutBlockMax];
     alignas(32) float outQ[kOutBlockMax];
@@ -115,9 +118,12 @@ void ReceiverResampler::ThreadMain()
                     const auto now = std::chrono::steady_clock::now();
                     if (now - lastFifoFullLog >= std::chrono::seconds(1))
                     {
-                        std::cout << "[ReceiverResampler] Internal FIFO at cap " << fifoUsed << "/" << kFifoMax
-                                  << " samples; pausing drain of input ring (pending "
-                                  << inRing_->GetSizeInBuffer() << " samples in ring)." << std::endl;
+                        CONSOLE_ALERT_STMT(
+                            std::cout << ConsoleAlert::kRedOpen << "[ReceiverResampler] internal FIFO at cap "
+                                      << fifoUsed << "/" << kFifoMax
+                                      << " samples; pausing drain of matched-filter ring (pending "
+                                      << inRing_->GetSizeInBuffer() << " samples)" << ConsoleAlert::kReset
+                                      << std::endl;);
                         lastFifoFullLog = now;
                     }
                     break;
@@ -149,6 +155,16 @@ void ReceiverResampler::ThreadMain()
             outMax = std::min(kOutBlockMax, free);
             while (outMax <= 0 && running_ && !*stopAll_)
             {
+                const auto nowOr = std::chrono::steady_clock::now();
+                if (nowOr - lastOutRingFullLog >= std::chrono::seconds(1))
+                {
+                    lastOutRingFullLog = nowOr;
+                    CONSOLE_ALERT_STMT(std::cout << ConsoleAlert::kRedOpen
+                                                 << "[ReceiverResampler] output float ring saturated (no free "
+                                                    "slots); fill="
+                                                 << outRing_->GetSizeInBuffer() << "/" << cap << ConsoleAlert::kReset
+                                                 << std::endl;);
+                }
                 outCvSpace_->wait_for(lk, std::chrono::milliseconds(1));
                 const int fill2 = outRing_->GetSizeInBuffer();
                 const int free2 = std::max(0, cap - fill2);
@@ -187,7 +203,17 @@ void ReceiverResampler::ThreadMain()
         {
             std::unique_lock<std::mutex> lk(*outMtx_);
             while (!*stopAll_ && !outRing_->CanCommitWrite(static_cast<int>(produced)))
+            {
+                const auto nowOc = std::chrono::steady_clock::now();
+                if (nowOc - lastOutCommitBlockLog >= std::chrono::seconds(1))
+                {
+                    lastOutCommitBlockLog = nowOc;
+                    CONSOLE_ALERT_STMT(std::cout << ConsoleAlert::kRedOpen
+                                                 << "[ReceiverResampler] output float ring cannot commit " << produced
+                                                 << " samples (backpressure)" << ConsoleAlert::kReset << std::endl;);
+                }
                 outCvSpace_->wait(lk);
+            }
             if (*stopAll_)
                 break;
             float* wI = nullptr;

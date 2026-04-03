@@ -30,6 +30,7 @@
 
 #include "Receiver.h"
 #include "AWGNChannel.h"
+#include "ConsoleAlert.h"
 #include <chrono>
 #include <iostream>
 #include <algorithm>
@@ -83,7 +84,7 @@ void QpskEvmSnrFromFrame(const float* i, const float* q, int n, double& evmRms, 
 }
 } // namespace
 
-Receiver::Receiver(/* args */):oBufferFilter(SPB*256,32*SPB),OutputQ(LengthQueue)
+Receiver::Receiver(/* args */):oBufferFilter(kRxRingFloatLen, kRxRingFloatExtra),OutputQ(LengthQueue)
 {
     FilterInI = (float*) _mm_malloc(SPB*2*sizeof(float),32);
     FilterInQ = FilterInI + SPB;
@@ -262,7 +263,8 @@ void Receiver::OperateFilter(void)
     auto symrate_display_start = std::chrono::steady_clock::now();
     auto next_symrate_start = std::chrono::steady_clock::now();
     bool symrate_collecting = false;
-    
+    auto lastRxFilterRingSatLog = std::chrono::steady_clock::now();
+
     #ifdef WRITE_LOG_THR
 	mtxfilethr.lock();
     FILE *fidthr = fopen("LogThreadsInfo.txt","at");
@@ -295,6 +297,19 @@ void Receiver::OperateFilter(void)
             std::unique_lock<std::mutex> lk(mtxFilterRing);
             if (SymbolRateDetected.load(std::memory_order_relaxed))
             {
+                if (oBufferFilter.AlmostFull())
+                {
+                    const auto nowSat = std::chrono::steady_clock::now();
+                    if (nowSat - lastRxFilterRingSatLog >= std::chrono::seconds(1))
+                    {
+                        lastRxFilterRingSatLog = nowSat;
+                        CONSOLE_ALERT_STMT(std::cout << ConsoleAlert::kRedOpen
+                                                     << "[RXFilter] matched-filter float ring almost full; fill="
+                                                     << oBufferFilter.GetSizeInBuffer() << "/"
+                                                     << oBufferFilter.GetBufferSize() - 1 << ConsoleAlert::kReset
+                                                     << std::endl;);
+                    }
+                }
                 CvFilterUser.wait(lk, [&] {
                     return StopAll || !oBufferFilter.AlmostFull();
                 });

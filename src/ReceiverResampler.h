@@ -61,7 +61,7 @@ public:
 private:
     static constexpr int kOverlap = 3; // cubic interpolation needs 4 points => keep last 3
     /// Max samples queued in the internal FIFO (fifoI_/fifoQ_ after fifoRd_). Backpressure: stop draining inRing_ above this.
-    static constexpr int kFifoMax = SPB * 512;
+    static constexpr int kFifoMax = kResamplerFifoMaxSamples;
     BufferFloat* inRing_ = nullptr;
     std::mutex* inMtx_ = nullptr;
     std::condition_variable* inCvData_ = nullptr;

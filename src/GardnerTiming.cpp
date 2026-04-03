@@ -8,6 +8,7 @@
  */
 
 #include "GardnerTiming.h"
+#include "Lagrange4Simd.h"
 #include "definitions.h"
 
 #include <algorithm>
@@ -143,18 +144,13 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
         if (!CanInterp(tAbs_) || !CanInterp(tAbs_ - 0.5) || !CanInterp(tAbs_ + 0.5))
             break;
 
-        const float yI = InterpLagrange4I(tAbs_);
-        const float yQ = InterpLagrange4Q(tAbs_);
-        // outI[outCount] = yI;
-        // outQ[outCount] = yQ;
+        float yI, yQ, eI, eQ, lI, lQ;
+        InterpLagrange4IQ(tAbs_, &yI, &yQ);
+        InterpLagrange4IQ(tAbs_ - 0.5, &eI, &eQ);
+        InterpLagrange4IQ(tAbs_ + 0.5, &lI, &lQ);
 
-        const float eI = InterpLagrange4I(tAbs_ - 0.5);
-        const float eQ = InterpLagrange4Q(tAbs_ - 0.5);
-        const float lI = InterpLagrange4I(tAbs_ + 0.5);
-        const float lQ = InterpLagrange4Q(tAbs_ + 0.5);
-        
-        outI[outCount] = InterpLagrange4I(tAbs_);
-        outQ[outCount] = InterpLagrange4Q(tAbs_);
+        outI[outCount] = yI;
+        outQ[outCount] = yQ;
 
 #ifdef DEBUG_GARDNER_OUTPUTS
         dbgEarly.push_back(eI);
@@ -180,8 +176,8 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
             {
                 for (int k = 0; k < kOutSps; ++k)
                 {
-                    const float ii = InterpLagrange4I(t8[k]);
-                    const float qq = InterpLagrange4Q(t8[k]);
+                    float ii, qq;
+                    InterpLagrange4IQ(t8[k], &ii, &qq);
                     float iq[2] = {ii, qq};
                     std::fwrite(iq, sizeof(float), 2, static_cast<FILE*>(fidOut8Sps_));
                 }
@@ -338,30 +334,24 @@ float GardnerTiming::InterpLagrange4I(double t) const
 {
     const long long k = static_cast<long long>(std::floor(t));
     const double mu = t - static_cast<double>(k);
-    const float x0 = GetRingI(k - 1);
-    const float x1 = GetRingI(k + 0);
-    const float x2 = GetRingI(k + 1);
-    const float x3 = GetRingI(k + 2);
-    const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
-    const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
-    const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
-    const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
-    return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3);
+    return Lagrange4Simd::EvalSet_ps(GetRingI(k - 1), GetRingI(k + 0), GetRingI(k + 1), GetRingI(k + 2),
+                                     Lagrange4Simd::Coeffs_ps(mu));
 }
 
 float GardnerTiming::InterpLagrange4Q(double t) const
 {
     const long long k = static_cast<long long>(std::floor(t));
     const double mu = t - static_cast<double>(k);
-    const float x0 = GetRingQ(k - 1);
-    const float x1 = GetRingQ(k + 0);
-    const float x2 = GetRingQ(k + 1);
-    const float x3 = GetRingQ(k + 2);
-    const double c0 = -mu * (mu - 1.0) * (mu - 2.0) / 6.0;
-    const double c1 = (mu + 1.0) * (mu - 1.0) * (mu - 2.0) / 2.0;
-    const double c2 = -(mu + 1.0) * mu * (mu - 2.0) / 2.0;
-    const double c3 = (mu + 1.0) * mu * (mu - 1.0) / 6.0;
-    return static_cast<float>(c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3); 
+    return Lagrange4Simd::EvalSet_ps(GetRingQ(k - 1), GetRingQ(k + 0), GetRingQ(k + 1), GetRingQ(k + 2),
+                                     Lagrange4Simd::Coeffs_ps(mu));
+}
+
+void GardnerTiming::InterpLagrange4IQ(double t, float* outI, float* outQ) const
+{
+    const long long k = static_cast<long long>(std::floor(t));
+    const double mu = t - static_cast<double>(k);
+    Lagrange4Simd::EvalIQ_ps(GetRingI(k - 1), GetRingI(k + 0), GetRingI(k + 1), GetRingI(k + 2),
+                             GetRingQ(k - 1), GetRingQ(k + 0), GetRingQ(k + 1), GetRingQ(k + 2), mu, outI, outQ);
 }
 
 #ifdef DEBUG_GARDNER_OUTPUTS

@@ -11,7 +11,10 @@
 
 #include "Sampler.h"
 #include "AWGNChannel.h"
+#include "ConsoleAlert.h"
+#include "definitions.h"
 #include <chrono>
+#include <iostream>
 #include <cstring>
 #include <thread>
 #include <atomic>
@@ -19,7 +22,7 @@
 
 
 extern std::atomic<bool> Finish;
-Sampler::Sampler(bool DebugIn):Debug(DebugIn),oBuffer(128*SPB,2*SPB)
+Sampler::Sampler(bool DebugIn):Debug(DebugIn),oBuffer(kSamplerShortRingSize, kSamplerShortRingExtra)
 { 
 #ifdef DEBUG_SAMPLER
     OutAllI = (short *) _mm_malloc( 20000000*sizeof(short),32);
@@ -83,6 +86,7 @@ void Sampler::OperateSampler(void)
     auto ThroughputWindowStart = std::chrono::steady_clock::now();
     auto SamplerConsoleWindowStart = std::chrono::steady_clock::now();
     uint64_t SamplesInWindow = 0;
+    auto lastSamplerRingSatLog = std::chrono::steady_clock::now();
 
     while(!StopAll)
     {
@@ -91,10 +95,20 @@ void Sampler::OperateSampler(void)
             break;
         {
             std::unique_lock<std::mutex> lk(mtxSamplerBuffer_);
-            // Backpressure: never let the producer advance
-            // when the ring is almost full.
+            // Backpressure: never let the producer advance when the ring is almost full.
             while (!StopAll && oBuffer.AlmostFull())
+            {
+                const auto nowSat = std::chrono::steady_clock::now();
+                if (nowSat - lastSamplerRingSatLog >= std::chrono::seconds(1))
+                {
+                    lastSamplerRingSatLog = nowSat;
+                    CONSOLE_ALERT_STMT(std::cout << ConsoleAlert::kRedOpen
+                                                 << "[Sampler] channel→RX short ring almost full; fill="
+                                                 << oBuffer.GetSizeInBuffer() << "/" << oBuffer.GetBufferSize() - 1
+                                                 << ConsoleAlert::kReset << std::endl;);
+                }
                 CvSamplerUser.wait(lk);
+            }
 
             short* BufOut = oBuffer.GetWriteBuffer(SPB * 2);
             std::copy(chTmp, chTmp + 2 * SPB, BufOut);

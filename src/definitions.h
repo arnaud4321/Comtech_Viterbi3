@@ -21,6 +21,21 @@ const int ReceiverInputBatchIQSymbols = BatchSize3;
 const int SPB = 8192;
 const double SamplingFrequency = 21.42e6;
 
+/** @brief Float ring length (per I/Q) for RX @c BufferFloat stages (filter, resampler, freq corrector). Larger ⇒ more headroom under backpressure. */
+inline constexpr int kRxRingFloatLen = SPB * 1024;
+/** @brief Extra margin for wrapped access in RX @c BufferFloat rings. */
+inline constexpr int kRxRingFloatExtra = SPB * 64;
+/** @brief Interleaved-short ring length for AWGN channel output and @ref Sampler (shorts). */
+inline constexpr int kSamplerShortRingSize = 1024 * SPB;
+inline constexpr int kSamplerShortRingExtra = 4 * SPB;
+/** @brief @c BufferShort capacity (shorts) on AWGN output path (ties to @ref TxOutputBatchSize). */
+inline constexpr int kChannelOutShortRingSize = 256 * TxOutputBatchSize;
+inline constexpr int kChannelOutShortRingExtra = 4 * TxOutputBatchSize;
+/** @brief Resampler internal FIFO cap (floats per I/Q); bounds drain from matched-filter ring. */
+inline constexpr int kResamplerFifoMaxSamples = SPB * 1024;
+/** @brief SCO input queue depth (float batches) before @ref ChannelSamplingClockOffset::EnqueueNoisyInterleaved blocks. */
+inline constexpr int kScoInputQueueDepth = 36;
+
 /** @brief Transmitter source: internal PRBS or IQ file. */
 enum TxModes
 { PRBS_TX,FILE_TX};

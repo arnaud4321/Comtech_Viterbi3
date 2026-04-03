@@ -1,4 +1,6 @@
 #include "BufferShort.h"
+#include "ConsoleAlert.h"
+#include <cstdio>
 BufferShort::BufferShort(int BufferSizeIn, int ExtraBufferSizeIn)
     : BufferSize(BufferSizeIn), ExtraBufferSize(ExtraBufferSizeIn)
 {
@@ -45,10 +47,12 @@ short * BufferShort::GetReadBuffer(int Size)
             ExtraAtEnd = PtrEnd - BufferSize;
             if (ExtraAtEnd > ExtraBufferSize)
             {
-                std::fprintf(stderr,
-                             "FATAL: BufferShort wrapped read exceeds ExtraBufferSize "
-                             "(ExtraAtEnd=%d, ExtraBufferSize=%d, Size=%d, PtrRd=%d, BufferSize=%d)\n",
-                             ExtraAtEnd, ExtraBufferSize, Size, PtrRd, BufferSize);
+                CONSOLE_ALERT_STMT(std::fprintf(stderr,
+                                                "%sFATAL: BufferShort wrapped read exceeds ExtraBufferSize "
+                                                "(ExtraAtEnd=%d, ExtraBufferSize=%d, Size=%d, PtrRd=%d, "
+                                                "BufferSize=%d)%s\n",
+                                                ConsoleAlert::kRedOpen, ExtraAtEnd, ExtraBufferSize, Size, PtrRd,
+                                                BufferSize, ConsoleAlert::kReset););
                 std::abort();
             }
             assert(ExtraAtEnd <= ExtraBufferSize && "BufferShort: ExtraBufferSize too small for wrapped read");
@@ -69,10 +73,12 @@ void BufferShort::AdvancePtrWr(int Advance)
             const int overflow = (NewPtrWr - BufferSize);
             if (overflow > ExtraBufferSize)
             {
-                std::fprintf(stderr,
-                             "FATAL: BufferShort wrapped write exceeds ExtraBufferSize "
-                             "(overflow=%d, ExtraBufferSize=%d, Advance=%d, PtrWr=%d, BufferSize=%d)\n",
-                             overflow, ExtraBufferSize, Advance, PtrWr, BufferSize);
+                CONSOLE_ALERT_STMT(std::fprintf(stderr,
+                                                "%sFATAL: BufferShort wrapped write exceeds ExtraBufferSize "
+                                                "(overflow=%d, ExtraBufferSize=%d, Advance=%d, PtrWr=%d, "
+                                                "BufferSize=%d)%s\n",
+                                                ConsoleAlert::kRedOpen, overflow, ExtraBufferSize, Advance, PtrWr,
+                                                BufferSize, ConsoleAlert::kReset););
                 std::abort();
             }
             assert(overflow <= ExtraBufferSize && "BufferShort: ExtraBufferSize too small for wrapped write");

@@ -12,7 +12,7 @@
 /**
  * @brief Interpolating Gardner detector producing one sample per symbol (QPSK-oriented).
  *
- * Maintains a large ring buffer, fractional-time Lagrange-4 interpolation, and PI loop on \f$\omega\f$
+ * Maintains a large ring buffer, fractional-time Lagrange-4 interpolation (@ref Lagrange4Simd, AVX for I/Q pairs), and PI loop on \f$\omega\f$
  * (samples per symbol in the 2 sps domain). Lock is inferred from stability of \f$\omega\f$.
  *
  * **Update cadence for @f$\omega@f$:** @f$\omega@f$ is **constant** between updates. It is recomputed **once every
@@ -67,6 +67,7 @@ private:
     float GetRingQ(long long absIdx) const;
     float InterpLagrange4I(double t) const;
     float InterpLagrange4Q(double t) const;
+    void InterpLagrange4IQ(double t, float* outI, float* outQ) const;
     void PushOmegaHistoryOnUpdate();
 
     double omegaNom_ = 2.0;

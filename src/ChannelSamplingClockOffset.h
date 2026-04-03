@@ -27,7 +27,7 @@
  *
  * **Interpolation / startup:** After enough input has accumulated, @c tScoAbs is initialized with a fixed
  * lag (@c latencySamples = @c kComplexPerBatch·64) behind the newest ring index so Lagrange-4 has margin.
- * Each output uses @c InterpLagrange4I/Q at @c tScoAbs; if the cursor leaves a safe band inside the ring,
+ * Each output uses Lagrange-4 at @c tScoAbs (@ref Lagrange4Simd, AVX in the hot loop); if the cursor leaves a safe band inside the ring,
  * the lag state is dropped until warmup completes again.
  *
  * **Output:** @c FloatBatchToShortsInterleaved applies @c lrintf and clamps to int16; results go to the shared
@@ -56,7 +56,7 @@ public:
     void ThreadMain();
 
 private:
-    static constexpr int kInputQueueDepth = 4;
+    static constexpr int kInputQueueDepth = kScoInputQueueDepth;
     static constexpr int kComplexPerBatch = TxOutputBatchSize / 2;
     static constexpr int kScoOutMax = kComplexPerBatch + 512;
 

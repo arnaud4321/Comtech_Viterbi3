@@ -148,8 +148,8 @@ private:
     ReceiverPhaseTrackingDD phaseTrackingDD_;
     Sampler *pSampler;
     BufferFloat oBufferFilter;
-    BufferFloat oBufferResampled{SPB*256,32*SPB};
-    BufferFloat oBufferFreqCorrected{SPB*256,32*SPB};
+    BufferFloat oBufferResampled{kRxRingFloatLen, kRxRingFloatExtra};
+    BufferFloat oBufferFreqCorrected{kRxRingFloatLen, kRxRingFloatExtra};
     Viterbi oViterbi[3] = {Viterbi(0),Viterbi(1),Viterbi(2)};
     bool StopAll;
     float *SplitI[3], *SplitQ[3];

@@ -10,6 +10,7 @@
  */
 
 #include "ReceiverFreqCorrector.h"
+#include "ConsoleAlert.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,6 +103,7 @@ void ReceiverFreqCorrector::ThreadMain()
     auto nextEstimateStart = std::chrono::steady_clock::now();
     bool estimateCollecting = true;
     const double chunkDt = static_cast<double>(kChunk) / SamplingFrequency;
+    auto lastOutRingSatLog = std::chrono::steady_clock::now();
 
     while (running_ && (stopAll_ == nullptr || !*stopAll_))
     {
@@ -284,7 +286,18 @@ void ReceiverFreqCorrector::ThreadMain()
         {
             std::unique_lock<std::mutex> lk(*outMtx_);
             while (running_ && (stopAll_ == nullptr || !*stopAll_) && outRing_->AlmostFull())
+            {
+                const auto nowSat = std::chrono::steady_clock::now();
+                if (nowSat - lastOutRingSatLog >= std::chrono::seconds(1))
+                {
+                    lastOutRingSatLog = nowSat;
+                    CONSOLE_ALERT_STMT(std::cout << ConsoleAlert::kRedOpen
+                                                 << "[CentralFreq] output float ring almost full; fill="
+                                                 << outRing_->GetSizeInBuffer() << "/" << outRing_->GetBufferSize() - 1
+                                                 << ConsoleAlert::kReset << std::endl;);
+                }
                 outCvData_->wait_for(lk, std::chrono::milliseconds(1));
+            }
             if (!running_ || (stopAll_ && *stopAll_))
                 break;
             float* outI = nullptr;

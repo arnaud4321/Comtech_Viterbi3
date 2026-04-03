@@ -1,4 +1,5 @@
 #include "BufferFloat.h"
+#include "ConsoleAlert.h"
 #include <cstdio>
 BufferFloat::BufferFloat(int BufferSizeIn, int ExtraBufferSizeIn)
     : BufferSize(BufferSizeIn), ExtraBufferSize(ExtraBufferSizeIn)
@@ -55,10 +56,12 @@ void BufferFloat::GetReadBuffer(float * &OutI, float * &OutQ, int Size)
                 ExtraAtEnd = (PtrEnd - BufferSize) ;
                 if (ExtraAtEnd > ExtraBufferSize)
                 {
-                    std::fprintf(stderr,
-                                 "FATAL: BufferFloat wrapped read exceeds ExtraBufferSize "
-                                 "(ExtraAtEnd=%d, ExtraBufferSize=%d, Size=%d, PtrRd=%d, BufferSize=%d)\n",
-                                 ExtraAtEnd, ExtraBufferSize, Size, PtrRd, BufferSize);
+                    CONSOLE_ALERT_STMT(std::fprintf(stderr,
+                                                    "%sFATAL: BufferFloat wrapped read exceeds ExtraBufferSize "
+                                                    "(ExtraAtEnd=%d, ExtraBufferSize=%d, Size=%d, PtrRd=%d, "
+                                                    "BufferSize=%d)%s\n",
+                                                    ConsoleAlert::kRedOpen, ExtraAtEnd, ExtraBufferSize, Size, PtrRd,
+                                                    BufferSize, ConsoleAlert::kReset););
                     std::abort();
                 }
                 assert(ExtraAtEnd <= ExtraBufferSize && "BufferFloat: ExtraBufferSize too small for wrapped read");
@@ -80,10 +83,12 @@ void BufferFloat::AdvancePtrWr(int Advance)
             const int overflow = (NewPtrWr - BufferSize);
             if (overflow > ExtraBufferSize)
             {
-                std::fprintf(stderr,
-                             "FATAL: BufferFloat wrapped write exceeds ExtraBufferSize "
-                             "(overflow=%d, ExtraBufferSize=%d, Advance=%d, PtrWr=%d, BufferSize=%d)\n",
-                             overflow, ExtraBufferSize, Advance, PtrWr, BufferSize);
+                CONSOLE_ALERT_STMT(std::fprintf(stderr,
+                                                "%sFATAL: BufferFloat wrapped write exceeds ExtraBufferSize "
+                                                "(overflow=%d, ExtraBufferSize=%d, Advance=%d, PtrWr=%d, "
+                                                "BufferSize=%d)%s\n",
+                                                ConsoleAlert::kRedOpen, overflow, ExtraBufferSize, Advance, PtrWr,
+                                                BufferSize, ConsoleAlert::kReset););
                 std::abort();
             }
             assert(overflow <= ExtraBufferSize && "BufferFloat: ExtraBufferSize too small for wrapped write");

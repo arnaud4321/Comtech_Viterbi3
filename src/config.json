@@ -7,9 +7,9 @@
   },
   "Channel": {
     "Esn0": 10,
-    "InitialGainDb": -10,
+    "InitialRangeDb": -10,
     "DynamicRangeDb": -30,
-    "InitialFrequencyShift": 200000,
+    "InitialFrequencyShift": 50000,
     "FrequencyShift": 50000,
     "ClockMismatchPpm": 1000,
     "CarrierToSymbolRateRatio": 100,
@@ -38,7 +38,6 @@
   },
   "ConstellationDisplay": {
     "PeriodSec": 0.5,
-    "DrawPeriodSec": 0.5,
     "NumSymbols": 2048,
     "MaxAbs": 2.0,
     "Backend": "matplotlib",

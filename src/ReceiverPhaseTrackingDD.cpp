@@ -15,6 +15,10 @@
 #include <iostream>
 #include <sys/stat.h>
 
+// Define to use std::atan2 (libm reference, comparisons / profiling) instead of the fast
+// polynomial in dd_phase_error. Example: -DPHASE_DD_USE_LIBM_ATAN2 on the compiler command line.
+// #define PHASE_DD_USE_LIBM_ATAN2
+
 namespace
 {
 constexpr float kTwoPi = 6.2831853071795864769f;
@@ -37,6 +41,32 @@ inline void qpsk_slicer(float i, float q, float& di, float& dq)
     dq = (q >= 0.0f) ? 1.0f : -1.0f;
 }
 
+#ifndef PHASE_DD_USE_LIBM_ATAN2
+/**
+ * @brief Minimax polynomial atan(x) for x in [0,1] (≈ max error ~1e-4 rad), quadrant fix-up.
+ *        Cheaper than libm atan2 on the hot PLL path (called every symbol).
+ */
+inline float fast_atan2(float y, float x)
+{
+    if (x == 0.0f && y == 0.0f)
+        return 0.0f;
+    const float ax = std::fabs(x);
+    const float ay = std::fabs(y);
+    const float mx = (ax > ay) ? ax : ay;
+    const float mn = (ax > ay) ? ay : ax;
+    const float a = (mn / (mx + 1e-20f));
+    const float a2 = a * a;
+    float r = (((-0.0464964749f * a2 + 0.15931422f) * a2 - 0.327622764f) * a2 + 0.99997726f) * a;
+    if (ay > ax)
+        r = 1.57079637f - r;
+    if (x < 0.0f)
+        r = 3.14159265f - r;
+    if (y < 0.0f)
+        r = -r;
+    return r;
+}
+#endif
+
 inline float dd_phase_error(float i, float q, float di, float dq)
 {
     // e = angle(z * conj(d)) = atan2(Im, Re), where:
@@ -44,7 +74,11 @@ inline float dd_phase_error(float i, float q, float di, float dq)
     // z * conj(d) = (i*di + q*dq) + j(q*di - i*dq)
     const float re = i * di + q * dq;
     const float im = q * di - i * dq;
+#ifdef PHASE_DD_USE_LIBM_ATAN2
     return std::atan2(im, re);
+#else
+    return fast_atan2(im, re);
+#endif
 }
 } // namespace
 
