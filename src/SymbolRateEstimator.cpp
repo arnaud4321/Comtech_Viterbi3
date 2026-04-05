@@ -4,7 +4,7 @@
  *
  * @details **PushBatch** — Append batches until @c Fill == @c Nfft.
  * **RunEstimation** — Optionally interpolate to @c NfftOs (@c InterpLagrange4, @c OsFactor). Build FFT input
- * @f$\Re = |r[n]|@f$, @f$\Im = 0@f$. @c fftwf_execute; collect @f$|X[k]|^2@f$ for @f$k@f$ near @f$k_0@f$
+ * @f$\Re = |r[n]|@f$, @f$\Im = 0@f$. Intel IPP @c ippsDFTFwd_CToC_32fc; collect @f$|X[k]|^2@f$ for @f$k@f$ near @f$k_0@f$
  * (code: @c f0Hz = 0.5*FsHz mapped through @c fsUsed / @c nFftUsed). Skip central bin @f$k_0@f$ when picking @c bestK;
  * parabola on @f$y_L,y_C,y_R@f$ → @c SymbolRateHz. Reset @c Fill when done. Acceptance logic lives in @ref Receiver.
  */
@@ -16,7 +16,6 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
-#include <fftw3.h>
 #include <sys/stat.h>
 
 namespace
@@ -35,22 +34,6 @@ SymbolRateEstimator::SymbolRateEstimator()
     Reset(FsHz, Nfft, MaxOffsetHz);
 }
 
-SymbolRateEstimator::~SymbolRateEstimator()
-{
-    if (FftPlan)
-        fftwf_destroy_plan(static_cast<fftwf_plan>(FftPlan));
-    if (FftIn)
-        fftwf_free(FftIn);
-    if (FftOut)
-        fftwf_free(FftOut);
-    if (FftPlanOs)
-        fftwf_destroy_plan(static_cast<fftwf_plan>(FftPlanOs));
-    if (FftInOs)
-        fftwf_free(FftInOs);
-    if (FftOutOs)
-        fftwf_free(FftOutOs);
-}
-
 void SymbolRateEstimator::Reset(double samplingFreqHz, int fftSize, int maxOffsetHz, double peakToMedianThreshold)
 {
     FsHz = samplingFreqHz;
@@ -60,38 +43,19 @@ void SymbolRateEstimator::Reset(double samplingFreqHz, int fftSize, int maxOffse
     Fill = 0;
     BufferI.assign(Nfft, 0.0f);
     BufferQ.assign(Nfft, 0.0f);
-    if (FftPlan)
-    {
-        fftwf_destroy_plan(static_cast<fftwf_plan>(FftPlan));
-        FftPlan = nullptr;
-    }
-    if (FftIn)
-    {
-        fftwf_free(FftIn);
-        FftIn = nullptr;
-    }
-    if (FftOut)
-    {
-        fftwf_free(FftOut);
-        FftOut = nullptr;
-    }
-    FftIn = fftwf_alloc_complex(static_cast<size_t>(Nfft));
-    FftOut = fftwf_alloc_complex(static_cast<size_t>(Nfft));
-    FftPlan = fftwf_plan_dft_1d(
-        Nfft,
-        static_cast<fftwf_complex*>(FftIn),
-        static_cast<fftwf_complex*>(FftOut),
-        FFTW_FORWARD,
-        FFTW_ESTIMATE);
+
+    dft_.ensureLength(Nfft);
+    fftIn_.resize(static_cast<size_t>(Nfft));
+    fftOut_.resize(static_cast<size_t>(Nfft));
 
     // Oversampled plan/buffers
     if (OsFactor > 1.0)
     {
         const int want = static_cast<int>(std::llround(OsFactor * static_cast<double>(Nfft)));
-        // FFTW supports non power-of-two sizes; keep exact oversampling ratio.
+        // IPP DFT supports arbitrary lengths; keep exact oversampling ratio.
         NfftOs = std::max(1024, want);
-        BufferOsI.assign(NfftOs, 0.0f);
-        BufferOsQ.assign(NfftOs, 0.0f);
+        BufferOsI.assign(static_cast<size_t>(NfftOs), 0.0f);
+        BufferOsQ.assign(static_cast<size_t>(NfftOs), 0.0f);
     }
     else
     {
@@ -99,31 +63,18 @@ void SymbolRateEstimator::Reset(double samplingFreqHz, int fftSize, int maxOffse
         BufferOsI.clear();
         BufferOsQ.clear();
     }
-    if (FftPlanOs)
-    {
-        fftwf_destroy_plan(static_cast<fftwf_plan>(FftPlanOs));
-        FftPlanOs = nullptr;
-    }
-    if (FftInOs)
-    {
-        fftwf_free(FftInOs);
-        FftInOs = nullptr;
-    }
-    if (FftOutOs)
-    {
-        fftwf_free(FftOutOs);
-        FftOutOs = nullptr;
-    }
+
     if (NfftOs > 0)
     {
-        FftInOs = fftwf_alloc_complex(static_cast<size_t>(NfftOs));
-        FftOutOs = fftwf_alloc_complex(static_cast<size_t>(NfftOs));
-        FftPlanOs = fftwf_plan_dft_1d(
-            NfftOs,
-            static_cast<fftwf_complex*>(FftInOs),
-            static_cast<fftwf_complex*>(FftOutOs),
-            FFTW_FORWARD,
-            FFTW_ESTIMATE);
+        dftOs_.ensureLength(NfftOs);
+        fftInOs_.resize(static_cast<size_t>(NfftOs));
+        fftOutOs_.resize(static_cast<size_t>(NfftOs));
+    }
+    else
+    {
+        dftOs_.ensureLength(0);
+        fftInOs_.clear();
+        fftOutOs_.clear();
     }
 }
 
@@ -160,7 +111,7 @@ bool SymbolRateEstimator::PushBatch(const float* I, const float* Q, int length)
 SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
 {
     SymbolRateEstimateResult out;
-    const bool useOs = (OsFactor > 1.0 && NfftOs > 0 && FftPlanOs && FftInOs && FftOutOs);
+    const bool useOs = (OsFactor > 1.0 && NfftOs > 0 && dftOs_.valid());
     const int nFftUsed = useOs ? NfftOs : Nfft;
     const double fsUsed = useOs ? (FsHz * OsFactor) : FsHz;
     out.FftResolutionHz = fsUsed / static_cast<double>(nFftUsed);
@@ -170,9 +121,14 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
         return out;
     }
 
-    if (!FftPlan || !FftIn || !FftOut)
+    if (!dft_.valid() || static_cast<int>(fftIn_.size()) != Nfft || static_cast<int>(fftOut_.size()) != Nfft)
     {
         out.FailReason = "FFT plan/buffers not initialized";
+        return out;
+    }
+    if (useOs && (static_cast<int>(fftInOs_.size()) != NfftOs || static_cast<int>(fftOutOs_.size()) != NfftOs))
+    {
+        out.FailReason = "FFT oversampled buffers not initialized";
         return out;
     }
 
@@ -196,20 +152,22 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
         inLen = NfftOs;
     }
 
-    void* fftInPtr = useOs ? FftInOs : FftIn;
+    Ipp32fc* fftInPtr = useOs ? fftInOs_.data() : fftIn_.data();
+    Ipp32fc* fftOutPtr = useOs ? fftOutOs_.data() : fftOut_.data();
     for (int n = 0; n < inLen; ++n)
     {
         const float ii = inI[n];
         const float qq = inQ[n];
-        // FFT input: per-sample magnitude |r| as real part, zero imaginary (see SymbolRateEstimator.h).
         const float a = std::sqrt(ii * ii + qq * qq);
-        static_cast<fftwf_complex*>(fftInPtr)[n][0] = a;
-        static_cast<fftwf_complex*>(fftInPtr)[n][1] = 0.0f;
+        fftInPtr[n].re = a;
+        fftInPtr[n].im = 0.0f;
     }
 
-    fftwf_execute(static_cast<fftwf_plan>(useOs ? FftPlanOs : FftPlan));
+    if (useOs)
+        dftOs_.forward(fftInOs_.data(), fftOutOs_.data());
+    else
+        dft_.forward(fftIn_.data(), fftOut_.data());
 
-    // Cast to double before multiply/divide to avoid int32 overflow when MaxOffsetHz*Nfft is large.
     const double kMaxReal =
         std::round(static_cast<double>(MaxOffsetHz) * static_cast<double>(nFftUsed) / fsUsed);
     const int kMax = std::min(nFftUsed / 2 - 2, static_cast<int>(kMaxReal));
@@ -226,20 +184,18 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
 
     std::vector<float> mags;
     mags.reserve(2 * kMax + 1);
-    // Map physical Fs/2 (base sample rate FsHz) onto the FFT bin grid at fsUsed (FsHz or FsHz*OsFactor).
     const double f0Hz = 0.5 * FsHz;
     const int k0 = std::max(0, std::min(nFftUsed - 1, static_cast<int>(std::llround(f0Hz * nFftUsed / fsUsed))));
     int bestK = k0;
     float bestM = -1.0f;
-    void* fftOutPtr = useOs ? FftOutOs : FftOut;
     for (int k = (k0 - kMax); k <= (k0 + kMax); ++k)
     {
         const int idx = (k >= 0 && k < nFftUsed) ? k : ((k % nFftUsed + nFftUsed) % nFftUsed);
-        const float re = static_cast<fftwf_complex*>(fftOutPtr)[idx][0];
-        const float im = static_cast<fftwf_complex*>(fftOutPtr)[idx][1];
+        const float re = fftOutPtr[idx].re;
+        const float im = fftOutPtr[idx].im;
         const float m = re * re + im * im;
         mags.push_back(m);
-        if (idx != k0 && m > bestM) // ignore exact center bin
+        if (idx != k0 && m > bestM)
         {
             bestM = m;
             bestK = idx;
@@ -249,13 +205,6 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
 #ifdef DEBUG_SYMBOL_RATE_ESTIMATOR_DUMP
     {
         mkdir("../data", 0755);
-        // Dump mags BEFORE nth_element mutates it.
-        // File format:
-        //   [int32 len][int32 kMax][int32 bestK]
-        //   [double FsHzUsed][int32 NfftUsed][double FsHzBase][int32 NfftBase][double OsFactor]
-        //   [int32 nTime][float I_time[nTime]][float Q_time[nTime]]
-        //   [float mags_zoom[len]]  (k = (center bin - kMax) : (center bin + kMax))
-        //   [float mags_full[NfftUsed]] (k = 0:NfftUsed-1)
         const int32_t len = static_cast<int32_t>(mags.size());
         const int32_t kMax32 = static_cast<int32_t>(kMax);
         const int32_t bestK32 = static_cast<int32_t>(bestK);
@@ -288,8 +237,8 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
             magsFull.resize(static_cast<size_t>(nFftUsed));
             for (int k = 0; k < nFftUsed; ++k)
             {
-                const float re = static_cast<fftwf_complex*>(fftOutPtr)[k][0];
-                const float im = static_cast<fftwf_complex*>(fftOutPtr)[k][1];
+                const float re = fftOutPtr[k].re;
+                const float im = fftOutPtr[k].im;
                 magsFull[static_cast<size_t>(k)] = re * re + im * im;
             }
             std::fwrite(magsFull.data(), sizeof(float), static_cast<size_t>(nFftUsed), f);
@@ -317,12 +266,12 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
     const int idxL = (leftK >= 0) ? leftK : (nFftUsed + leftK);
     const int idxC = bestK;
     const int idxR = (rightK < nFftUsed) ? rightK : (rightK - nFftUsed);
-    const float reL = static_cast<fftwf_complex*>(fftOutPtr)[idxL][0];
-    const float imL = static_cast<fftwf_complex*>(fftOutPtr)[idxL][1];
-    const float reC = static_cast<fftwf_complex*>(fftOutPtr)[idxC][0];
-    const float imC = static_cast<fftwf_complex*>(fftOutPtr)[idxC][1];
-    const float reR = static_cast<fftwf_complex*>(fftOutPtr)[idxR][0];
-    const float imR = static_cast<fftwf_complex*>(fftOutPtr)[idxR][1];
+    const float reL = fftOutPtr[idxL].re;
+    const float imL = fftOutPtr[idxL].im;
+    const float reC = fftOutPtr[idxC].re;
+    const float imC = fftOutPtr[idxC].im;
+    const float reR = fftOutPtr[idxR].re;
+    const float imR = fftOutPtr[idxR].im;
     const float yL = reL * reL + imL * imL;
     const float yC = reC * reC + imC * imC;
     const float yR = reR * reR + imR * imR;
@@ -338,7 +287,7 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
     out.SymbolRateHz = fPeak;
     out.Detected = true;
 
-    Fill = 0; // restart accumulation for next estimate window
+    Fill = 0;
     return out;
 }
 
@@ -358,4 +307,3 @@ int SymbolRateEstimator::ClampPow2(int n)
         p <<= 1;
     return p;
 }
-

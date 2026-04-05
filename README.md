@@ -20,16 +20,36 @@ Algorithm documentation lives in the source headers (`src/*.h`) and file blocks 
 
 The project is built with CMake and links against:
 
-- **FFTW3f**
+- **UHD** (USRP Hardware Driver, ≥ 4.7) — CMake uses `find_package(UHD 4.7.0 REQUIRED)`; see [Building and Installing UHD from source](https://files.ettus.com/manual/page_build_guide.html) for upstream dependency lists and platform notes.
+- **Intel IPP** (`ipps`, `ippcore`; expected under `/opt/intel/oneapi/ipp/latest` unless you override `IPP_ROOT`)
 - **Boost** (system, program_options)
 - **pthread**
-- **Intel IPP** (optional: auto-detected if installed under `/opt/intel/oneapi/ipp/latest`)
 
-On Ubuntu-like distributions you typically need packages similar to:
+**Using a packaged UHD (typical on Ubuntu):**
 
-- `fftw3-dev` (or `libfftw3-dev` + float variant if split)
+```bash
+sudo apt-get install libuhd-dev
+```
+
+If CMake does not find UHD, point it at your install (e.g. custom prefix): set environment variable `UHD_DIR` or pass `-DCMAKE_PREFIX_PATH=/path/to/uhd/prefix`.
+
+**Build dependencies for compiling UHD itself** (from the Ettus manual — *Setting up the dependencies on Ubuntu*):
+
+```bash
+sudo apt-get install autoconf automake build-essential ccache cmake cpufrequtils doxygen ethtool \
+  g++ git inetutils-tools libboost-all-dev libncurses5 libncurses5-dev libusb-1.0-0 libusb-1.0-0-dev \
+  libusb-dev python3-dev python3-mako python3-numpy python3-requests python3-scipy python3-setuptools \
+  python3-ruamel.yaml
+```
+
+Fedora/RHEL-style systems: see the same guide for `yum` / `dnf` package lists. Other requirements (compiler, CMake, Boost, LibUSB, Python, Mako, etc.) are summarized under *Build Dependencies* on that page.
+
+On Ubuntu you can install that set in one step with `scripts/install_uhd_build_deps_ubuntu.sh` (runs `sudo apt-get install …`).
+
+**Other packages for this repository:**
+
 - `libboost-system-dev` `libboost-program-options-dev`
-- (optional) oneAPI IPP installed under `/opt/intel/oneapi/ipp/latest`
+- oneAPI IPP installed under `/opt/intel/oneapi/ipp/latest` (or set `IPP_ROOT` in CMake)
 
 ### Configure & build
 

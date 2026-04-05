@@ -58,11 +58,16 @@ add_executable(${PROJECT_NAME} ${Sources})
 
 
 SET_TARGET_PROPERTIES(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
+
+# USRP Hardware Driver — see https://files.ettus.com/manual/page_build_guide.html (build deps) and UHDConfig.cmake.
+find_package(UHD 4.7.0 REQUIRED)
+
 # libs
 set(IPP_ROOT "/opt/intel/oneapi/ipp/latest" CACHE PATH "Intel IPP installation directory")
 target_include_directories(${PROJECT_NAME} PUBLIC src ${IPP_ROOT}/include/ipp)
+target_include_directories(${PROJECT_NAME} PRIVATE ${UHD_INCLUDE_DIRS})
 target_link_directories(${PROJECT_NAME} PRIVATE ${IPP_ROOT}/lib/intel64)
-target_link_libraries(${PROJECT_NAME} uhd pthread boost_system boost_program_options ipps ippcore fftw3f)
+target_link_libraries(${PROJECT_NAME} PRIVATE ${UHD_LIBRARIES} pthread boost_system boost_program_options ipps ippcore)
 
 # Symlink so clangd finds compile_commands.json at repo root (Ctrl+F12)
 execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json

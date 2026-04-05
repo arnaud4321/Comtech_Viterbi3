@@ -4,7 +4,10 @@
  */
 #pragma once
 
+#include "IppComplexDft1d.h"
+
 #include <cstddef>
+#include <vector>
 
 /** @brief Tunables for @ref CentralFreqEstimatorViva. */
 struct CentralFreqVivaConfig
@@ -42,7 +45,7 @@ class CentralFreqEstimatorViva
 {
 public:
     CentralFreqEstimatorViva();
-    ~CentralFreqEstimatorViva();
+    ~CentralFreqEstimatorViva() = default;
 
     /** @brief Set sample rate and estimator thresholds / FFT zero-padding. */
     void Configure(double samplingFreqHz, const CentralFreqVivaConfig& cfg);
@@ -58,9 +61,9 @@ private:
     double fsHz_ = 0.0;
     CentralFreqVivaConfig cfg_{};
 
-    void* fftIn_ = nullptr;   // fftwf_complex*
-    void* fftOut_ = nullptr;  // fftwf_complex*
-    void* fftPlan_ = nullptr; // fftwf_plan
+    IppComplexDft1d dft_;
+    std::vector<Ipp32fc> fftIn_;
+    std::vector<Ipp32fc> fftOut_;
     int nFft_ = 0;
 
     void ensureFftSize(int nFft);

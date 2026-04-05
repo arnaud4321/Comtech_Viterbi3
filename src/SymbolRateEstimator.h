@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include "IppComplexDft1d.h"
+
 #include <vector>
 
 //#define DEBUG_SYMBOL_RATE_ESTIMATOR_DUMP
@@ -37,7 +39,7 @@ struct SymbolRateEstimateResult
  * **Optional upsampling** — If @c OsFactor @f$>1@f$ (default 2), Lagrange-4 interpolation in time yields @c NfftOs
  * samples at effective @f$f_{s,\mathrm{used}} = F_s \cdot OsFactor@f$ for the FFT stage.
  * **Nonlinearity** — Per sample @f$a_n = \sqrt{I_n^2+Q_n^2}@f$.
- * **FFT** — Forward **complex** @c fftwf_plan_dft_1d; length @c Nfft or @c NfftOs (@c OsFactor path). In @c RunEstimation, length @f$N@f$
+ * **FFT** — Forward **complex** DFT via Intel IPP (@c ippsDFTFwd_CToC_32fc); length @c Nfft or @c NfftOs (@c OsFactor path). In @c RunEstimation, length @f$N@f$
  * and rate @f$f_{s,\mathrm{used}}@f$ are the local @c nFftUsed / @c fsUsed. Input @f$z[n]=a_n+j0@f$. Output @f$X[k]@f$ is complex; @f$|X[k]|^2@f$ uses Re and Im.
  * **Reference bin @f$k_0@f$** — @f$k_0=\mathrm{round}\bigl((F_s/2)\cdot N/f_{s,\mathrm{used}}\bigr)@f$ with @f$F_s=@f$@c FsHz (member). So bin @f$k_0@f$ corresponds to **physical** @f$F_s/2@f$ Hz
  * on a grid sampled at @f$f_{s,\mathrm{used}}@f$ (either @f$F_s@f$ or @f$F_s\cdot@f$@c OsFactor).
@@ -50,7 +52,7 @@ class SymbolRateEstimator
 {
 public:
     SymbolRateEstimator();
-    ~SymbolRateEstimator();
+    ~SymbolRateEstimator() = default;
 
     /** @brief Reinitialize FFT sizes, thresholds, and internal buffers. */
     void Reset(double samplingFreqHz,
@@ -75,18 +77,18 @@ private:
     int Fill = 0;
     std::vector<float> BufferI;
     std::vector<float> BufferQ;
-    void* FftIn = nullptr;
-    void* FftOut = nullptr;
-    void* FftPlan = nullptr;
+    IppComplexDft1d dft_;
+    std::vector<Ipp32fc> fftIn_;
+    std::vector<Ipp32fc> fftOut_;
 
     // Optional time-domain upsampling (Lagrange) before FFT when OsFactor > 1.
     double OsFactor = 2.0;
     int NfftOs = 0;
     std::vector<float> BufferOsI;
     std::vector<float> BufferOsQ;
-    void* FftInOs = nullptr;
-    void* FftOutOs = nullptr;
-    void* FftPlanOs = nullptr;
+    IppComplexDft1d dftOs_;
+    std::vector<Ipp32fc> fftInOs_;
+    std::vector<Ipp32fc> fftOutOs_;
 
     static bool IsPowerOfTwo(int n);
     static int ClampPow2(int n);

@@ -1,7 +1,7 @@
 # Doxyfile — Comtech Viterbi3 (generated for maintainers)
 
 PROJECT_NAME           = "Comtech Viterbi3"
-PROJECT_BRIEF          = "Multithreaded QPSK receive-chain simulator with Viterbi decoding"
+PROJECT_BRIEF          = "QPSK RX-chain simulator: UHD/IPP, Gardner, phase DD, Viterbi (Doxygen: src + mainpage)"
 
 USE_MDFILE_AS_MAINPAGE = docs/doxygen_mainpage.md
 OUTPUT_DIRECTORY       = docs/doxygen
