@@ -32,6 +32,7 @@ void Params::ReadParams(string FileName)
     InitialGainDb = j["Channel"].value("InitialGainDb", j["Channel"].value("InitialRangeDb", 0.0));
     // Keep name "DynamicRangeDb": it is a dB span applied over the ramp segments.
     DynamicRangeDb = j["Channel"].value("DynamicRangeDb", 0.0);
+    ApplyGainBeforeNoise = j["Channel"].value("ApplyGainBeforeNoise", false);
     InitialFrequencyShift = j["Channel"].value("InitialFrequencyShift", 0.0);
     FrequencyShift = j["Channel"]["FrequencyShift"];
     ClockMismatchPpm = j["Channel"].value("ClockMismatchPpm", 0.0);

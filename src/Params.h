@@ -38,6 +38,8 @@ public:
     double CarrierToSymbolRateRatio;
     double AccelerationPeriod;
     double TotalPeriod, StablePeriod;
+    /// If true, applies channel gain directly to the signal before adding noise (varies SNR).
+    bool ApplyGainBeforeNoise = false;
     SimModes SimMode;
     unsigned int NumErrors;
     unsigned int Seed;

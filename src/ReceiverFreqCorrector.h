@@ -57,7 +57,7 @@ public:
 
     void Start(BufferFloat* inRing, std::mutex* inMtx, std::condition_variable* inCvData,
                BufferFloat* outRing, std::mutex* outMtx, std::condition_variable* outCvData,
-               ReceiverPhaseTrackingDD* phaseDD, bool* stopAll);
+               ReceiverPhaseTrackingDD* phaseDD, std::atomic<bool>* stopAll);
 
     void StopJoin();
 
@@ -81,7 +81,7 @@ private:
     std::condition_variable* outCvData_ = nullptr;
 
     ReceiverPhaseTrackingDD* phaseDD_ = nullptr;
-    bool* stopAll_ = nullptr;
+    std::atomic<bool>* stopAll_ = nullptr;
 
     std::thread thread_;
     bool running_ = false;

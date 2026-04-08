@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+extern mutex mtxfilethr;
 
 ReceiverResampler::ReceiverResampler() = default;
 
@@ -25,7 +26,7 @@ ReceiverResampler::~ReceiverResampler()
 
 void ReceiverResampler::Start(BufferFloat* inRing, std::mutex* inMtx, std::condition_variable* inCvData,
                               BufferFloat* outRing, std::mutex* outMtx, std::condition_variable* outCvData,
-                              std::condition_variable* outCvSpace, bool* stopAll)
+                              std::condition_variable* outCvSpace, std::atomic<bool>* stopAll)
 {
     StopJoin();
     inRing_ = inRing;
@@ -86,6 +87,15 @@ void ReceiverResampler::UpdateFromSymbolRateHz(double symbolRateHz)
  */
 void ReceiverResampler::ThreadMain()
 {
+
+    #ifdef WRITE_LOG_THR
+	mtxfilethr.lock();
+    FILE *fidthr = fopen("LogThreadsInfo.txt","at");
+    fprintf(fidthr,"Receiver Resampler  Thread %d\n", gettid());
+    fclose(fidthr);
+    mtxfilethr.unlock();
+    #endif
+
     constexpr int kReadChunk = SPB;
     constexpr int kOutBlockMax = SPB * 2; // worst-case upsampling (Advance=0.5)
     auto lastFifoFullLog = std::chrono::steady_clock::now();

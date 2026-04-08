@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <vector>
 using namespace std;
 #include "definitions.h"
 #include "Prbs23.h"
@@ -65,11 +66,31 @@ class Transmitter
     DiffEncode oDiffEncode[3];
     TxFilter oTxFilter;
     thread DataGenThread, FilterThread;
-    bool StopAll = false;
+    std::atomic<bool> StopAll{false};
     SimpleQueue DataQ, FilterQ;
     condition_variable CvFilterData, CvDataFilter, CvOutFilter, CvFilterOut;
     std::mutex mtxDataQ_;
     std::mutex mtxFilterQ_;
+
+    // TX symbol frame queue (pre-TxFilter, mapped to +/-1) with backpressure.
+    // Only built when ENABLE_RAW_PREVITERBI_METRICS is enabled.
+#ifdef ENABLE_RAW_PREVITERBI_METRICS
+    static constexpr int kTxSymFrame = ReceiverInputBatchIQSymbols; // == BatchSize3
+    static constexpr int kTxSymQueueDepth = 2048;
+    struct TxSymSlot
+    {
+        alignas(32) float i[kTxSymFrame];
+        alignas(32) float q[kTxSymFrame];
+    };
+    std::vector<TxSymSlot> txSymPool_;
+    int txSymHead_ = 0;
+    int txSymTail_ = 0;
+    int txSymCount_ = 0;
+    std::mutex mtxTxSymQ_;
+    std::condition_variable cvTxSymReady_;
+    std::condition_variable cvTxSymSpace_;
+    bool pushTxSymFrameBlocking_(const float* i, const float* q);
+#endif
 
     void GenerateData(void);
     void FilterData(void);
@@ -92,7 +113,12 @@ public:
     }
     // Atomic copy (internal mutex) from the TX output FIFO (FilterQ).
     // Returns false if stopAll becomes true while waiting.
-    bool CopyOutputSamples(float* dst, int nFloats, bool& stopAll);
+    bool CopyOutputSamples(float* dst, int nFloats, std::atomic<bool>& stopAll);
+
+    // TX symbol reference accessors.
+    // When ENABLE_RAW_PREVITERBI_METRICS is OFF, these return false and do nothing (no backpressure / no queue).
+    bool TryPopTxSymbolFrame(float* dstI, float* dstQ, int nSym);
+    bool WaitPopTxSymbolFrame(float* dstI, float* dstQ, int nSym);
     void GetCVOut(condition_variable* &CVIn, condition_variable* &CVOut )
     {
         CVIn = &CvOutFilter;

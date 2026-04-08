@@ -140,14 +140,27 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
 
     while (outCount < outMax)
     {
-        // Need availability for t, t-0.5 and t+0.5.
-        if (!CanInterp(tAbs_) || !CanInterp(tAbs_ - 0.5) || !CanInterp(tAbs_ + 0.5))
+        // When locked, compute the Gardner TED / PI update only once every N output symbols to reduce CPU.
+        // In between, keep omega_ constant and only interpolate the on-time sample.
+        constexpr int kLockedTedDecim = 4;
+        const bool lockedLocal = locked_;
+        const bool doTed = (!lockedLocal) || (kLockedTedDecim <= 1) || ((outCount % kLockedTedDecim) == 0);
+
+        if (!CanInterp(tAbs_))
             break;
 
-        float yI, yQ, eI, eQ, lI, lQ;
+        float yI, yQ;
         InterpLagrange4IQ(tAbs_, &yI, &yQ);
-        InterpLagrange4IQ(tAbs_ - 0.5, &eI, &eQ);
-        InterpLagrange4IQ(tAbs_ + 0.5, &lI, &lQ);
+
+        float eI = 0.0f, eQ = 0.0f, lI = 0.0f, lQ = 0.0f;
+        if (doTed)
+        {
+            // Need availability for t-0.5 and t+0.5 only when the TED is evaluated.
+            if (!CanInterp(tAbs_ - 0.5) || !CanInterp(tAbs_ + 0.5))
+                break;
+            InterpLagrange4IQ(tAbs_ - 0.5, &eI, &eQ);
+            InterpLagrange4IQ(tAbs_ + 0.5, &lI, &lQ);
+        }
 
         outI[outCount] = yI;
         outQ[outCount] = yQ;
@@ -185,31 +198,33 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
         }
 #endif
 
-        // Gardner TED on complex signal (use current on-time symbol).
-        errorAcc_ += (lI - eI) * yI + (lQ - eQ) * yQ;
- //      errorAcc_ += (eI - lI) * yI + (eQ - lQ) * yQ;
+        if (doTed)
+        {
+            // Gardner TED on complex signal (use current on-time symbol).
+            errorAcc_ += (lI - eI) * yI + (lQ - eQ) * yQ;
 
 #ifdef DEBUG_GARDNER_OUTPUTS
-        dbgErr.push_back(errorAcc_);
-        dbgOmega.push_back(static_cast<float>(omega_));
-        // Phase within symbol: phi = frac(t/2) in [0,1).
-        const double u = 0.5 * tAbs_;
-        const double phi = u - std::floor(u);
-        dbgPhi.push_back(static_cast<float>(phi));
+            dbgErr.push_back(errorAcc_);
+            dbgOmega.push_back(static_cast<float>(omega_));
+            // Phase within symbol: phi = frac(t/2) in [0,1).
+            const double u = 0.5 * tAbs_;
+            const double phi = u - std::floor(u);
+            dbgPhi.push_back(static_cast<float>(phi));
 #endif
 
-        updateCounter_++;
-        if (updateCounter_ >= updatePeriod_)
-        {
-            updateCounter_ = 0;
+            updateCounter_++;
+            if (updateCounter_ >= updatePeriod_)
+            {
+                updateCounter_ = 0;
 
-            double meanErr = errorAcc_ / updatePeriod_;
-            integ_ += ki_ * meanErr;
+                double meanErr = errorAcc_ / updatePeriod_;
+                integ_ += ki_ * meanErr;
 
-            omega_ = omegaNom_ + integ_ + kp_ * static_cast<double>(meanErr);
-            omega_ = std::max(1.7, std::min(2.3, omega_));
-            errorAcc_=0.0;
-            PushOmegaHistoryOnUpdate();
+                omega_ = omegaNom_ + integ_ + kp_ * static_cast<double>(meanErr);
+                omega_ = std::max(1.7, std::min(2.3, omega_));
+                errorAcc_ = 0.0;
+                PushOmegaHistoryOnUpdate();
+            }
         }
 
         tAbs_ += omega_;

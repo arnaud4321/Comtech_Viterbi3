@@ -7,7 +7,7 @@
             "command": "cmake",
             "args": [
                 "-DCMAKE_BUILD_TYPE=Debug",
-                "-B", "${workspaceFolder}/build",
+                "-B", "${workspaceFolder}/build-debug",
                 "-S", "${workspaceFolder}"
             ],
             "options": {
@@ -24,7 +24,7 @@
             "type": "shell",
             "command": "cmake",
             "args": [
-                "--build", "${workspaceFolder}/build"
+                "--build", "${workspaceFolder}/build-debug"
             ],
             "options": {
                 "cwd": "${workspaceFolder}"

@@ -45,7 +45,7 @@ public:
      */
     void Start(BufferFloat* inRing, std::mutex* inMtx, std::condition_variable* inCvData,
                BufferFloat* outRing, std::mutex* outMtx, std::condition_variable* outCvData,
-               std::condition_variable* outCvSpace, bool* stopAll);
+               std::condition_variable* outCvSpace, std::atomic<bool>* stopAll);
 
     void StopJoin();
 
@@ -71,7 +71,7 @@ private:
     std::condition_variable* outCvData_ = nullptr;
     std::condition_variable* outCvSpace_ = nullptr;
 
-    bool* stopAll_ = nullptr;
+    std::atomic<bool>* stopAll_ = nullptr;
 
     std::atomic<double> advance_{1.0};
     Resampler resampler_;

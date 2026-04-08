@@ -32,7 +32,7 @@ public:
     void ResetGardner(double nominalRatio, double kp, double ki, int lockAvg);
 
     void Start(BufferFloat* filterRing, std::mutex* mtxFilterRing,
-               std::condition_variable* cvFilterData, bool* stopAll,
+               std::condition_variable* cvFilterData, std::atomic<bool>* stopAll,
                double displayPeriodSec = 1.0);
 
     void StopJoin();
@@ -64,7 +64,7 @@ private:
     BufferFloat* pFilterBuf_ = nullptr;
     std::mutex* pMtxFilter_ = nullptr;
     std::condition_variable* pCvFilterData_ = nullptr;
-    bool* pStopAll_ = nullptr;
+    std::atomic<bool>* pStopAll_ = nullptr;
 
     alignas(32) float pendingI_[kPendingCap];
     alignas(32) float pendingQ_[kPendingCap];

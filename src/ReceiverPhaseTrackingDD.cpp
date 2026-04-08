@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <iostream>
 #include <sys/stat.h>
+extern mutex mtxfilethr;
 
 // Define to use std::atan2 (libm reference, comparisons / profiling) instead of the fast
 // polynomial in dd_phase_error. Example: -DPHASE_DD_USE_LIBM_ATAN2 on the compiler command line.
@@ -97,7 +98,7 @@ ReceiverPhaseTrackingDD::~ReceiverPhaseTrackingDD()
     StopJoin();
 }
 
-void ReceiverPhaseTrackingDD::Start(ReceiverTimingTracking* timingTracking, bool* stopAll,
+void ReceiverPhaseTrackingDD::Start(ReceiverTimingTracking* timingTracking, std::atomic<bool>* stopAll,
                                     double displayPeriodSec)
 {
     timingTracking_ = timingTracking;
@@ -216,6 +217,15 @@ void ReceiverPhaseTrackingDD::closeDebugFiles()
  */
 void ReceiverPhaseTrackingDD::ThreadMain()
 {
+
+    #ifdef WRITE_LOG_THR
+	mtxfilethr.lock();
+    FILE *fidthr = fopen("LogThreadsInfo.txt","at");
+    fprintf(fidthr,"Receiver Phase Tracking  Thread %d\n", gettid());
+    fclose(fidthr);
+    mtxfilethr.unlock();
+    #endif
+
     alignas(32) float inI[kSymFrame];
     alignas(32) float inQ[kSymFrame];
     alignas(32) float outI[kSymFrame];
@@ -234,6 +244,14 @@ void ReceiverPhaseTrackingDD::ThreadMain()
         openDebugFilesIfNeeded();
 #endif
 
+        // When locked, update the DD-PLL only once every N symbols to reduce CPU.
+        // Gains are scaled by N on update symbols to roughly preserve loop bandwidth.
+        constexpr int kLockedUpdateDecim = 4;
+        bool lockedLocal = locked_.load(std::memory_order_relaxed);
+
+        float sumMagSq = 0.0f;
+        float sumMag = 0.0f;
+
         for (int n = 0; n < kSymFrame; ++n)
         {
             // Apply current NCO rotation: z_rot = z * exp(-j*phase)
@@ -250,28 +268,51 @@ void ReceiverPhaseTrackingDD::ThreadMain()
             const float zrI = i * c + q * s;
             const float zrQ = -i * s + q * c;
 
+            float magI = std::abs(zrI);
+            float magQ = std::abs(zrQ);
+            sumMagSq += (magI * magI + magQ * magQ);
+            sumMag += (magI + magQ);
+
             float di, dq;
             qpsk_slicer(zrI, zrQ, di, dq);
-            const float err = dd_phase_error(zrI, zrQ, di, dq);
 
-            // 2nd-order PLL update (symbol-rate loop)
-            freqRadPerSym_ += ki_ * err;
-            phaseRad_ += freqRadPerSym_ + kp_ * err;
-            phaseRad_ = wrap_pm_pi(phaseRad_);
+            float err = 0.0f;
+            const bool doUpdate = (!lockedLocal) || (kLockedUpdateDecim <= 1) || ((n % kLockedUpdateDecim) == 0);
+            if (doUpdate)
+            {
+                err = dd_phase_error(zrI, zrQ, di, dq);
+
+                // 2nd-order PLL update (symbol-rate loop)
+                freqRadPerSym_ += ki_ * err;
+                phaseRad_ += freqRadPerSym_ + kp_ * err;
+                phaseRad_ = wrap_pm_pi(phaseRad_);
+
+                // Lock detection on smoothed |err| (only needed until lock is reached).
+                if (!lockedLocal)
+                {
+                    const float aerr = std::abs(err);
+                    errEma_ = errEmaAlpha_ * aerr + (1.0f - errEmaAlpha_) * errEma_;
+                    if (errEma_ < lockThresholdRad_)
+                        lockCount_++;
+                    else
+                        lockCount_ = 0;
+                    if (lockCount_ >= lockCountRequired_)
+                    {
+                        locked_.store(true, std::memory_order_relaxed);
+                        lockedLocal = true;
+                    }
+                }
+            }
+            else
+            {
+                // When skipping the DD update, still advance the phase using current frequency estimate.
+                phaseRad_ += freqRadPerSym_;
+                phaseRad_ = wrap_pm_pi(phaseRad_);
+            }
 
             // Output corrected sample (already rotated)
             outI[n] = zrI;
             outQ[n] = zrQ;
-
-            // Lock detection on smoothed |err|
-            const float aerr = std::abs(err);
-            errEma_ = errEmaAlpha_ * aerr + (1.0f - errEmaAlpha_) * errEma_;
-            if (errEma_ < lockThresholdRad_)
-                lockCount_++;
-            else
-                lockCount_ = 0;
-            if (!locked_.load(std::memory_order_relaxed) && lockCount_ >= lockCountRequired_)
-                locked_.store(true, std::memory_order_relaxed);
 
 #ifdef DEBUG_PHASE_DD
             if (dbgIn_)
@@ -306,6 +347,18 @@ void ReceiverPhaseTrackingDD::ThreadMain()
 #endif
         }
 
+        float blockEvmRms = 0.0f;
+        if (sumMagSq > 1e-12f && sumMag > 1e-12f)
+        {
+            float P = sumMagSq / static_cast<float>(kSymFrame);
+            float M = sumMag / static_cast<float>(kSymFrame);
+            // Classical M2M4-based estimator for QPSK: EVM^2 = (2*P / M^2) - 1
+            float evmSq = (2.0f * P) / (M * M) - 1.0f;
+            if (evmSq > 0.0f)
+                blockEvmRms = std::sqrt(evmSq);
+        }
+        lastEvmRms_.store(static_cast<double>(blockEvmRms), std::memory_order_relaxed);
+
         symbols_total += static_cast<uint64_t>(kSymFrame);
         const bool nowLocked = locked_.load(std::memory_order_relaxed);
         if (nowLocked != prevLocked)
@@ -335,8 +388,10 @@ void ReceiverPhaseTrackingDD::ThreadMain()
                 const double t_rate = static_cast<double>(symbols_total) / SymbolRate;
                 const double t_sim = std::chrono::duration<double>(now - wall_start).count();
                 const bool nowLocked2 = locked_.load(std::memory_order_relaxed);
+                double snrEvmDb = (blockEvmRms > 1e-12f) ? (-20.0 * std::log10(blockEvmRms)) : std::numeric_limits<double>::quiet_NaN();
                 std::cout << "[ReceiverPhaseTrackingDD] freq_est=" << f_hz << " Hz"
                           << " locked=" << (nowLocked2 ? 1 : 0)
+                          << " snrEvmDb=" << snrEvmDb
                           << " errEma=" << errEma_ << " rad"
                           << " thresh=" << lockThresholdRad_ << " rad"
                           << " t_sim=" << t_sim << " s"
@@ -346,13 +401,10 @@ void ReceiverPhaseTrackingDD::ThreadMain()
             }
         }
 
-        // Only feed the downstream Viterbi path once phase tracking is locked.
-        // While unlocked, we still update the PLL state, but we discard frames.
-        if (nowLocked)
-        {
-            if (!pushOneFrameToQueue(outI, outQ))
-                break;
-        }
+        // Always feed downstream, even when not locked.
+        // Consumers can check IsLocked() to interpret status; discarding frames here can stall the pipeline.
+        if (!pushOneFrameToQueue(outI, outQ))
+            break;
     }
 }
 

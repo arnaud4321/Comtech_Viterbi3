@@ -53,7 +53,7 @@ void Sampler::StopThread(void)
     if(SamplingThread.joinable())
         SamplingThread.join();
 }
-bool Sampler::ReadFilterBatch(short* dst, int nShorts, bool& stopAll)
+bool Sampler::ReadFilterBatch(short* dst, int nShorts, std::atomic<bool>& stopAll)
 {
     std::unique_lock<std::mutex> lk(mtxSamplerBuffer_);
     short* p = oBuffer.GetReadBuffer(nShorts);

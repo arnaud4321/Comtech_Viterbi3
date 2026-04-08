@@ -47,6 +47,8 @@ Optional **compile definitions** (documented in source where used):
 
 - `ENABLE_CONSOLE_ALERTS` — emit backpressure / saturation console messages.
 - `PHASE_DD_USE_LIBM_ATAN2` — use `std::atan2` instead of the fast polynomial in decision-directed phase error (@ref ReceiverPhaseTrackingDD).
+- `ENABLE_RAW_PREVITERBI_METRICS` — enables the continuous raw pre-Viterbi intercorrelation, SER, and BER computation blocks in the Receiver.
+- `DEBUG_STATISTICS` — tracks Viterbi decoding metric growth to compute an EMA. It is used to dynamically unlock and resync the Viterbi decoder under very low SNR conditions (e.g., when the channel drops below the "cliff" at ~1.9dB, using a threshold of `kViterbiDesyncGrowthThr = 40.0`).
 
 Generate this HTML reference from the repository root:
 
@@ -66,3 +68,22 @@ Output directory: `docs/doxygen/html/` — open `index.html` in a browser.
 
 Class and file reference is generated from Doxygen comments in `src/*.h` and `src/*.cpp`
 (third-party `json.hpp` is excluded via `Doxyfile`).
+
+### Configuration (`config.json`)
+
+The simulation is controlled via a JSON configuration file (e.g. `src/config.json`) read by `Params::ReadParams`. The configuration encompasses several major sections:
+
+- **Transmitter**: defines the data source (`Method`: PRBS or File) and RRC `RollOff`.
+- **Channel**: controls the AWGN and impairments:
+  - `Esn0`: Base Es/N0 in dB.
+  - `ApplyGainBeforeNoise`: whether to apply the channel gain directly to the signal (varying the SNR) or to signal+noise.
+  - `InitialGainDb`, `DynamicRangeDb`: for piecewise dynamic gain ramps.
+  - `InitialFrequencyShift`, `FrequencyShift`: for piecewise dynamic frequency offset ramps.
+  - `ClockMismatchPpm`, `CarrierToSymbolRateRatio`: static sampling clock mismatches and Doppler scaling.
+  - `AccelerationPeriod`, `StablePeriod`: defines the duration of the piecewise ramps and stable states.
+- **CentralFrequency**: parameters for the coarse frequency estimator (VIVA), NCO smoothing, and AGC targets.
+- **SymbolRateEstimator**: defines the FFT properties and search window to find the exact symbol rate.
+- **ConstellationDisplay**: UI and Python plotting arguments.
+- **Simulation**: defines the simulation stop modes (e.g., number of errors) and `DisplayPeriodSec` for console telemetry.
+
+For a full parameter listing, refer to the project `README.md`.

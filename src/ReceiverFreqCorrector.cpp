@@ -16,6 +16,7 @@
 #include <cmath>
 #include <chrono>
 #include <iostream>
+extern mutex mtxfilethr;
 
 ReceiverFreqCorrector::ReceiverFreqCorrector()
 {
@@ -48,7 +49,7 @@ void ReceiverFreqCorrector::Configure(const ReceiverFreqCorrectorConfig& cfg, do
 
 void ReceiverFreqCorrector::Start(BufferFloat* inRing, std::mutex* inMtx, std::condition_variable* inCvData,
                                   BufferFloat* outRing, std::mutex* outMtx, std::condition_variable* outCvData,
-                                  ReceiverPhaseTrackingDD* phaseDD, bool* stopAll)
+                                  ReceiverPhaseTrackingDD* phaseDD, std::atomic<bool>* stopAll)
 {
     StopJoin();
     inRing_ = inRing;
@@ -93,6 +94,18 @@ void ReceiverFreqCorrector::StopJoin()
  */
 void ReceiverFreqCorrector::ThreadMain()
 {
+
+
+    
+    #ifdef WRITE_LOG_THR
+	mtxfilethr.lock();
+    FILE *fidthr = fopen("LogThreadsInfo.txt","at");
+    fprintf(fidthr,"Receiver Freq Corrector  Thread %d\n", gettid());
+    fclose(fidthr);
+    mtxfilethr.unlock();
+    #endif
+
+
     constexpr int kChunk = SPB; // process in SPB-sized blocks (2 sps complex)
     std::vector<float> tmpI(static_cast<size_t>(kChunk));
     std::vector<float> tmpQ(static_cast<size_t>(kChunk));

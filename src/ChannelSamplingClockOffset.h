@@ -46,7 +46,7 @@ public:
     /// Output buffer shared with CopyOutputSamples (same mutex and condition variables as the channel).
     void Start(BufferShort* outputBuffer, std::mutex* outputMutex,
                std::condition_variable* cvSpace, std::condition_variable* cvData,
-               bool* stopAll);
+               std::atomic<bool>* stopAll);
 
     void StopJoin();
 
@@ -84,7 +84,7 @@ private:
     std::mutex* pOutMtx_ = nullptr;
     std::condition_variable* pCvSpace_ = nullptr;
     std::condition_variable* pCvData_ = nullptr;
-    bool* pStopAll_ = nullptr;
+    std::atomic<bool>* pStopAll_ = nullptr;
 
     std::mutex mtxIn_;
     std::condition_variable cvInSpace_;

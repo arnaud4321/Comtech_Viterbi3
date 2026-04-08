@@ -25,6 +25,7 @@
 #include "ReceiverPhaseTrackingDD.h"
 #include "ReceiverFreqCorrector.h"
 #include "ConstellationDisplay.h"
+#include "Transmitter.h"
 #include <memory>
 #include <atomic>
 using namespace std;
@@ -45,6 +46,7 @@ struct DebugStatistics
     double MaxMetricsGrowth;
     double SumMetricsGrowth;
     double MeanMetricsGrowth;
+    double EmaMetricsGrowth;
     uint64_t NumBatches;
 };
 
@@ -147,11 +149,12 @@ private:
     ReceiverTimingTracking timingTracking_;
     ReceiverPhaseTrackingDD phaseTrackingDD_;
     Sampler *pSampler;
+    Transmitter* pTx_ = nullptr;
     BufferFloat oBufferFilter;
     BufferFloat oBufferResampled{kRxRingFloatLen, kRxRingFloatExtra};
     BufferFloat oBufferFreqCorrected{kRxRingFloatLen, kRxRingFloatExtra};
     Viterbi oViterbi[3] = {Viterbi(0),Viterbi(1),Viterbi(2)};
-    bool StopAll;
+    std::atomic<bool> StopAll{false};
     float *SplitI[3], *SplitQ[3];
     unsigned char *Outputs[3];
     void OperateFilter(void);
@@ -203,6 +206,21 @@ public:
 
     DebugStatistics CurrDebugStatistics;
 #endif
+    // Raw (pre-Viterbi) SER/BER from hard decisions vs ideal TX symbols (mapped +/-1).
+    uint64_t RawNumSymErrorsAll = 0;
+    uint64_t RawNumSymsAll = 0;
+    uint64_t RawNumErrorsAll = 0;
+    uint64_t RawNumBitsAll = 0;
+    // Latest SER sync diagnostic (inter-correlation peak).
+    std::atomic<double> RawSyncPeakAbs{0.0};
+    std::atomic<double> RawSyncPeakPhaseRad{0.0};
+    std::atomic<int> RawSyncLagSym{0};
+    std::atomic<double> RawSyncBestAbs{0.0};
+    std::atomic<double> RawSyncThrAbs{0.0};
+    std::atomic<bool> RawSyncLocked{false};
+    // Applied alignment used for SER/rawBER (resolves QPSK quadrant ambiguity).
+    std::atomic<double> RawSyncAppliedPhaseRad{0.0};
+    std::atomic<int> RawSyncAppliedQuad{0}; // 0..3 for +k*(pi/2) added to raw phase
     Receiver(/* args */);
     ~Receiver();
 
@@ -214,6 +232,9 @@ public:
 
     /** @brief Attach channel for constellation overlay / applied-parameter readout. */
     void SetChannel(class AWGNChannel* ch) { pChannel_ = ch; }
+
+    /** @brief Attach transmitter for raw pre-Viterbi comparisons (symbol reference). */
+    void SetTransmitter(Transmitter* tx) { pTx_ = tx; }
 
     /**
      * @brief Start all RX threads (filter, resampler, NCO, timing, phase, Viterbi workers).
@@ -263,4 +284,5 @@ public:
         pcv_rx_out = &CvRx2Out;
     }
     uint64_t NumErrorsAll, NumBitsAll;
+    double GetPhaseTrackingEvmRms() const { return phaseTrackingDD_.GetLastEvmRms(); }
 };

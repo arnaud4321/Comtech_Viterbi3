@@ -41,7 +41,83 @@ Transmitter::Transmitter(/* args */):DataQ(LengthQueue),FilterQ(LengthQueue)
         OutAllI = (float *) _mm_malloc( 20000000*sizeof(float),32);
     #endif
 
+#ifdef ENABLE_RAW_PREVITERBI_METRICS
+    txSymPool_.resize(static_cast<size_t>(kTxSymQueueDepth));
+#endif
+
 }
+
+#ifdef ENABLE_RAW_PREVITERBI_METRICS
+bool Transmitter::pushTxSymFrameBlocking_(const float* i, const float* q)
+{
+    std::unique_lock<std::mutex> lk(mtxTxSymQ_);
+    cvTxSymSpace_.wait(lk, [&] { return StopAll || txSymCount_ < kTxSymQueueDepth; });
+    if (StopAll)
+        return false;
+    TxSymSlot& slot = txSymPool_[static_cast<size_t>(txSymTail_)];
+    std::memcpy(slot.i, i, sizeof(float) * static_cast<size_t>(kTxSymFrame));
+    std::memcpy(slot.q, q, sizeof(float) * static_cast<size_t>(kTxSymFrame));
+    txSymTail_ = (txSymTail_ + 1) % kTxSymQueueDepth;
+    txSymCount_++;
+    lk.unlock();
+    cvTxSymReady_.notify_one();
+    return true;
+}
+
+bool Transmitter::TryPopTxSymbolFrame(float* dstI, float* dstQ, int nSym)
+{
+    if (nSym != kTxSymFrame)
+        return false;
+    std::lock_guard<std::mutex> lk(mtxTxSymQ_);
+    if (StopAll || txSymCount_ <= 0)
+        return false;
+    const TxSymSlot& slot = txSymPool_[static_cast<size_t>(txSymHead_)];
+    std::memcpy(dstI, slot.i, sizeof(float) * static_cast<size_t>(kTxSymFrame));
+    std::memcpy(dstQ, slot.q, sizeof(float) * static_cast<size_t>(kTxSymFrame));
+    txSymHead_ = (txSymHead_ + 1) % kTxSymQueueDepth;
+    txSymCount_--;
+    cvTxSymSpace_.notify_one();
+    return true;
+}
+
+bool Transmitter::WaitPopTxSymbolFrame(float* dstI, float* dstQ, int nSym)
+{
+    if (nSym != kTxSymFrame)
+        return false;
+    std::unique_lock<std::mutex> lk(mtxTxSymQ_);
+    cvTxSymReady_.wait(lk, [&] { return StopAll || txSymCount_ > 0; });
+    if (StopAll)
+        return false;
+    const TxSymSlot& slot = txSymPool_[static_cast<size_t>(txSymHead_)];
+    std::memcpy(dstI, slot.i, sizeof(float) * static_cast<size_t>(kTxSymFrame));
+    std::memcpy(dstQ, slot.q, sizeof(float) * static_cast<size_t>(kTxSymFrame));
+    txSymHead_ = (txSymHead_ + 1) % kTxSymQueueDepth;
+    txSymCount_--;
+    lk.unlock();
+    cvTxSymSpace_.notify_one();
+    return true;
+}
+#endif // ENABLE_RAW_PREVITERBI_METRICS
+
+#ifndef ENABLE_RAW_PREVITERBI_METRICS
+bool Transmitter::TryPopTxSymbolFrame(float* dstI, float* dstQ, int nSym)
+{
+    (void)dstI;
+    (void)dstQ;
+    (void)nSym;
+    return false;
+}
+
+bool Transmitter::WaitPopTxSymbolFrame(float* dstI, float* dstQ, int nSym)
+{
+    (void)dstI;
+    (void)dstQ;
+    (void)nSym;
+    return false;
+}
+#endif // !ENABLE_RAW_PREVITERBI_METRICS
+
+
 
 Transmitter::~Transmitter()
 {
@@ -64,6 +140,14 @@ Transmitter::~Transmitter()
 void Transmitter::StartThreads(TxModes TxMode, float RollOff, string FileName )
 {
     StopAll = false;
+#ifdef ENABLE_RAW_PREVITERBI_METRICS
+    {
+        std::lock_guard<std::mutex> lk(mtxTxSymQ_);
+        txSymHead_ = 0;
+        txSymTail_ = 0;
+        txSymCount_ = 0;
+    }
+#endif
     if(TxMode == PRBS_TX)
     {
         Data = (unsigned char*) _mm_malloc(8388608,32);
@@ -194,6 +278,12 @@ void Transmitter::FilterData(void)
                 FilterInQ[PtrOut++] = Map[ConvOut[3*PtrRd+j][i+1]];
             }
         }
+
+        // Store the ideal (noiseless) mapped symbols into the TX ring (pre-Viterbi SER / raw BER).
+        // This is before pulse shaping and channel impairments.
+#ifdef ENABLE_RAW_PREVITERBI_METRICS
+        (void)pushTxSymFrameBlocking_(FilterInI, FilterInQ);
+#endif
         
         DataQ.AdvanceRead();
         lkData.unlock();
@@ -229,7 +319,7 @@ void Transmitter::FilterData(void)
     oTxFilter.DeleteObjects();
 }
 
-bool Transmitter::CopyOutputSamples(float* dst, int nFloats, bool& stopAll)
+bool Transmitter::CopyOutputSamples(float* dst, int nFloats, std::atomic<bool>& stopAll)
 {
     std::unique_lock<std::mutex> lk(mtxFilterQ_);
     CvFilterOut.wait(lk, [&] { return stopAll || FilterQ.AvailableRead(); });

@@ -242,9 +242,57 @@ void AWGNChannel::GenerateOutput(void)
         if (!pTx->CopyOutputSamples(noisyChunk, TxOutputBatchSize, StopAll))
             break;
 
+        // Calculate current t_rate and rangeDb BEFORE adding noise so we can apply gain before noise if requested.
+        const double t_rate = static_cast<double>(batchCount) * TxOutputBatchDuration;
+        int seg = 0;
+        double deltaHz = 0.0;
+        double rangeDb = pParams->InitialGainDb;
+        const double a = AccelerationPeriod;
+        const double s = StablePeriod;
+        if (t_rate < s)
+        {
+            seg = 0; // stable1
+            deltaHz = 0.0;
+            rangeDb = pParams->InitialGainDb;
+        }
+        else if (t_rate < s + a)
+        {
+            seg = 1; // acc1: 0 -> +FrequencyShift
+            const double x = (t_rate - s) / std::max(1e-12, a);
+            deltaHz = std::max(0.0, std::min(1.0, x)) * pParams->FrequencyShift;
+            rangeDb = pParams->InitialGainDb +
+                      std::max(0.0, std::min(1.0, x)) * pParams->DynamicRangeDb;
+        }
+        else if (t_rate < s + a + s)
+        {
+            seg = 2; // stable2
+            deltaHz = pParams->FrequencyShift;
+            rangeDb = pParams->InitialGainDb + pParams->DynamicRangeDb;
+        }
+        else
+        {
+            seg = 3; // acc2: +FrequencyShift -> 0
+            const double x = (t_rate - (s + a + s)) / std::max(1e-12, a);
+            deltaHz = (1.0 - std::max(0.0, std::min(1.0, x))) * pParams->FrequencyShift;
+            rangeDb = pParams->InitialGainDb +
+                      (1.0 - std::max(0.0, std::min(1.0, x))) * pParams->DynamicRangeDb;
+        }
+
+        const double freqHz = pParams->InitialFrequencyShift + deltaHz;
+        const double ppmDoppler = freqHz * 1.0e6 / (pParams->CarrierToSymbolRateRatio * SymbolRate);
+        const double totalPpm = pParams->ClockMismatchPpm + ppmDoppler;
+
+        const float gain = static_cast<float>(std::pow(10.0, rangeDb / 20.0));
+
         // noisyChunk <- mkSig * tx + Stdn * noise (interleaved float IQ, one float per I or Q sample).
         {
             __m256 mStdn = _mm256_set1_ps(Stdn);
+            __m256 mg = _mm256_set1_ps(gain);
+            __m256 mSigScale = mkSig;
+            if (pParams->ApplyGainBeforeNoise) {
+                mSigScale = _mm256_mul_ps(mSigScale, mg);
+            }
+
             for (int i = 0; i < TxOutputBatchSize;)
             {
                 __m256 mInl = _mm256_loadu_ps(noisyChunk + i);
@@ -256,8 +304,13 @@ void AWGNChannel::GenerateOutput(void)
                 mOutl = _mm256_mul_ps(mStdn, mOutl);
                 mOuth = _mm256_mul_ps(mStdn, mOuth);
 
-                mOutl = _mm256_fmadd_ps(mInl, mkSig, mOutl);
-                mOuth = _mm256_fmadd_ps(mInh, mkSig, mOuth);
+                mOutl = _mm256_fmadd_ps(mInl, mSigScale, mOutl);
+                mOuth = _mm256_fmadd_ps(mInh, mSigScale, mOuth);
+
+                if (!pParams->ApplyGainBeforeNoise) {
+                    mOutl = _mm256_mul_ps(mOutl, mg);
+                    mOuth = _mm256_mul_ps(mOuth, mg);
+                }
 
                 _mm256_storeu_ps(noisyChunk + i - 16, mOutl);
                 _mm256_storeu_ps(noisyChunk + i - 8, mOuth);
@@ -302,64 +355,11 @@ void AWGNChannel::GenerateOutput(void)
             if (StopAll)
                 break;
 
-            const double t_rate = static_cast<double>(batchCount) * TxOutputBatchDuration;
             if (batchCount >= static_cast<int>(TransitionCounter[4]))
             {
                 Finish.store(true, std::memory_order_relaxed);
                 StopAll = true;
                 break;
-            }
-
-            // Segment 0..3: carrier offset = InitialFrequencyShift + deltaHz(freq ramp); gainDb ramps with DynamicRangeDb.
-            int seg = 0;
-            double deltaHz = 0.0;
-            double rangeDb = pParams->InitialGainDb;
-            const double a = AccelerationPeriod;
-            const double s = StablePeriod;
-            if (t_rate < s)
-            {
-                seg = 0; // stable1
-                deltaHz = 0.0;
-                rangeDb = pParams->InitialGainDb;
-            }
-            else if (t_rate < s + a)
-            {
-                seg = 1; // acc1: 0 -> +FrequencyShift
-                const double x = (t_rate - s) / std::max(1e-12, a);
-                deltaHz = std::max(0.0, std::min(1.0, x)) * pParams->FrequencyShift;
-                rangeDb = pParams->InitialGainDb +
-                          std::max(0.0, std::min(1.0, x)) * pParams->DynamicRangeDb;
-            }
-            else if (t_rate < s + a + s)
-            {
-                seg = 2; // stable2
-                deltaHz = pParams->FrequencyShift;
-                rangeDb = pParams->InitialGainDb + pParams->DynamicRangeDb;
-            }
-            else
-            {
-                seg = 3; // acc2: +FrequencyShift -> 0
-                const double x = (t_rate - (s + a + s)) / std::max(1e-12, a);
-                deltaHz = (1.0 - std::max(0.0, std::min(1.0, x))) * pParams->FrequencyShift;
-                rangeDb = pParams->InitialGainDb +
-                          (1.0 - std::max(0.0, std::min(1.0, x))) * pParams->DynamicRangeDb;
-            }
-
-            const double freqHz = pParams->InitialFrequencyShift + deltaHz;
-            const double ppmDoppler =
-                freqHz * 1.0e6 / (pParams->CarrierToSymbolRateRatio * SymbolRate);
-            const double totalPpm = pParams->ClockMismatchPpm + ppmDoppler;
-
-            // Amplitude vs time (before NCO): gainDb is an amplitude dB offset → linear gain 10^(gainDb/20).
-            const float gain = static_cast<float>(std::pow(10.0, rangeDb / 20.0));
-            {
-                const __m256 mg = _mm256_set1_ps(gain);
-                for (int i = 0; i < TxOutputBatchSize; i += 8)
-                {
-                    __m256 v = _mm256_loadu_ps(noisyChunk + i);
-                    v = _mm256_mul_ps(v, mg);
-                    _mm256_storeu_ps(noisyChunk + i, v);
-                }
             }
 
             FreqChunk chunk;
@@ -408,10 +408,12 @@ void AWGNChannel::GenerateOutput(void)
                 else if (t_rate < s + a + s) { gainDb = pParams->InitialGainDb + pParams->DynamicRangeDb; }
                 else { gainDb = pParams->InitialGainDb + (1.0 - (t_rate - (s + a + s)) / std::max(1e-12, a)) * pParams->DynamicRangeDb; }
                 const double t_sim = std::chrono::duration<double>(now - wall_start).count();
+                double snrDb = pParams->ApplyGainBeforeNoise ? (pParams->EsN0 + gainDb) : pParams->EsN0;
                 std::cout << std::fixed << std::setprecision(6)
                           << "[AWGN] status seg=" << segName
                           << " freqShiftHz=" << freqHz
                           << " gainDb=" << gainDb
+                          << " snrDb=" << snrDb
                           << " ppm=" << totalPpm
                           << " t_sim=" << t_sim << " s"
                           << " t_rate=" << t_rate << " s"
@@ -478,7 +480,7 @@ void AWGNChannel::ApplyFrequencyOffset(void)
 /**
  * @brief Blocks until @c nShorts IQ shorts are available from @ref OutputBuffer (post-SCO).
  */
-bool AWGNChannel::CopyOutputSamples(short* dst, int nShorts, bool& stopAll)
+bool AWGNChannel::CopyOutputSamples(short* dst, int nShorts, std::atomic<bool>& stopAll)
 {
     std::unique_lock<std::mutex> lk(mtxOutputBuffer_);
     short* p = OutputBuffer.GetReadBuffer(nShorts);

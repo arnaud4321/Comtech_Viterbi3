@@ -88,20 +88,25 @@ fig.subplots_adjust(left=0.06, right=0.99, top=0.94, bottom=0.09, wspace=0.06, h
 
 # Layout:
 # - Top: constellation (left) + state/status (right)
-# - Bottom: 3 history plots side-by-side
+# - Bottom: history plots (2 rows)
 gs = fig.add_gridspec(
-    nrows=2,
+    nrows=3,
     ncols=2,
-    height_ratios=[3.75, 1.12],
-    width_ratios=[4.0, 2.4],
+    height_ratios=[3.75, 1.12, 1.12],
+    width_ratios=[3.5, 2.9],
 )
 ax = fig.add_subplot(gs[0, 0])
 ax_info = fig.add_subplot(gs[0, 1])
 
-hist_spec = gs[1, :].subgridspec(1, 3, wspace=0.20)
-ax_ppm = fig.add_subplot(hist_spec[0, 0])
-ax_gain = fig.add_subplot(hist_spec[0, 1], sharex=ax_ppm)
-ax_freq = fig.add_subplot(hist_spec[0, 2], sharex=ax_ppm)
+hist_spec1 = gs[1, :].subgridspec(1, 3, wspace=0.20)
+ax_ppm = fig.add_subplot(hist_spec1[0, 0])
+ax_gain = fig.add_subplot(hist_spec1[0, 1], sharex=ax_ppm)
+ax_freq = fig.add_subplot(hist_spec1[0, 2], sharex=ax_ppm)
+
+hist_spec2 = gs[2, :].subgridspec(1, 3, wspace=0.20)
+ax_snr = fig.add_subplot(hist_spec2[0, 0], sharex=ax_ppm)
+ax_ber = fig.add_subplot(hist_spec2[0, 1], sharex=ax_ppm)
+ax_lock = fig.add_subplot(hist_spec2[0, 2], sharex=ax_ppm)
 
 sc = ax.scatter([], [], s=4)
 ax.set_title("Constellation (Viterbi input)")
@@ -111,8 +116,20 @@ ax.grid(True, alpha=0.3)
 ax.set_aspect("equal", adjustable="box")
 
 ax_info.set_axis_off()
-info_text = ax_info.text(
-    0.02,
+info_text_left = ax_info.text(
+    0.0,
+    1.02,
+    "",
+    transform=ax_info.transAxes,
+    va="top",
+    ha="left",
+    fontsize=8.5,
+    family="monospace",
+    clip_on=False,
+    bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="black", alpha=0.9),
+)
+info_text_right = ax_info.text(
+    0.45,
     1.02,
     "",
     transform=ax_info.transAxes,
@@ -147,9 +164,28 @@ ax_gain.tick_params(axis="both", labelsize=8)
 ax_freq.set_title("Frequency: applied vs corrected")
 ax_freq.set_ylabel("Hz", labelpad=4)
 ax_freq.grid(True, alpha=0.3)
-ax_freq.set_xlabel("t_sim (s)")
-# Place the y-axis label more inside its own subplot to avoid overlapping ax_gain.
+# remove x label from top row to avoid clutter
 ax_freq.yaxis.set_label_coords(-0.05, 0.5)
+
+ax_snr.set_title("SNR (dB)")
+ax_snr.set_ylabel("dB", labelpad=6)
+ax_snr.grid(True, alpha=0.3)
+ax_snr.set_xlabel("t_sim (s)")
+ax_snr.tick_params(axis="both", labelsize=8)
+
+ax_ber.set_title("BER")
+ax_ber.set_ylabel("BER", labelpad=6)
+ax_ber.set_yscale("log")
+ax_ber.grid(True, alpha=0.3)
+ax_ber.set_xlabel("t_sim (s)")
+ax_ber.tick_params(axis="both", labelsize=8)
+
+ax_lock.set_title("Lock Status")
+ax_lock.set_yticks([0, 1])
+ax_lock.set_yticklabels(['Unlock', 'Lock'])
+ax_lock.grid(True, alpha=0.3)
+ax_lock.set_xlabel("t_sim (s)")
+ax_lock.tick_params(axis="both", labelsize=8)
 
 line_ppm_applied, = ax_ppm.plot([], [], "-", lw=1.2, label="Channel totalPpm")
 line_ppm_sum, = ax_ppm.plot([], [], "--", lw=1.2, label="Rx totalPpm corrected")
@@ -162,9 +198,18 @@ ax_gain.legend(loc="upper right", fontsize=8)
 line_f_applied, = ax_freq.plot([], [], "-", lw=1.2, label="Channel freqHz")
 line_f_corr, = ax_freq.plot([], [], "--", lw=1.2, label="Rx (NCO+PhaseDD) Hz")
 ax_freq.legend(loc="upper right", fontsize=8)
-ax_freq.tick_params(axis="both", labelsize=8)
 
-hist_max = 600
+line_snr_applied, = ax_snr.plot([], [], "-", lw=1.2, label="Channel SNR")
+line_snr_est, = ax_snr.plot([], [], "--", lw=1.2, label="Est SNR (EVM)")
+ax_snr.legend(loc="lower left", fontsize=8)
+
+line_ber, = ax_ber.plot([], [], "-", lw=1.2, color="red", label="BER")
+
+line_lock_vit, = ax_lock.step([], [], "-", lw=1.2, label="Viterbi", where="post")
+line_lock_prbs, = ax_lock.step([], [], "--", lw=1.2, label="PRBS", where="post")
+ax_lock.legend(loc="lower left", fontsize=8)
+
+hist_max = 3000
 t_hist = []
 ppm_applied = []
 ppm_sum = []
@@ -173,6 +218,11 @@ gain_applied = []
 gain_corr = []
 f_applied = []
 f_corr = []
+snr_applied = []
+snr_est = []
+ber_hist = []
+lock_vit = []
+lock_prbs = []
 
 stdin_closed = False
 latest_pts = None
@@ -180,7 +230,7 @@ latest_kv = None
 dirty = False
 last_draw = 0.0
 last_ylim_update = 0.0
-x_window_sec = 30.0
+x_window_sec = 180.0
 
 while True:
     # Let GUI process events even when no data arrives
@@ -263,6 +313,20 @@ while True:
                     f_c = float(kv.get("centralNcoHz", "nan")) + float(kv.get("phaseFreqHz", "0.0"))
                     f_applied.append(f_a)
                     f_corr.append(f_c)
+                    
+                    snr_applied.append(float(kv.get("chanSnrDb", "nan")))
+                    snr_est.append(float(kv.get("snrFromEvmDb", "nan")))
+                    
+                    ber_v = float(kv.get("ber", "nan"))
+                    if ber_v == 0.0:
+                        ber_v = 1e-9 # avoid log scale zero issues
+                    ber_hist.append(ber_v)
+                    
+                    vit = str(kv.get("vitLocked", "0")).strip()
+                    prbs = str(kv.get("prbsLocked", "0")).strip()
+                    lock_vit.append(0.95 if vit == "1" else 0.0)
+                    lock_prbs.append(1.0 if prbs == "1" else 0.05)
+
                     if len(t_hist) > hist_max:
                         t_hist[:] = t_hist[-hist_max:]
                         ppm_applied[:] = ppm_applied[-hist_max:]
@@ -271,6 +335,11 @@ while True:
                         gain_corr[:] = gain_corr[-hist_max:]
                         f_applied[:] = f_applied[-hist_max:]
                         f_corr[:] = f_corr[-hist_max:]
+                        snr_applied[:] = snr_applied[-hist_max:]
+                        snr_est[:] = snr_est[-hist_max:]
+                        ber_hist[:] = ber_hist[-hist_max:]
+                        lock_vit[:] = lock_vit[-hist_max:]
+                        lock_prbs[:] = lock_prbs[-hist_max:]
             except Exception:
                 pass
 
@@ -302,17 +371,17 @@ while True:
             if "chanGainDb" in kv or "chanRangeDb" in kv:
                 v = kv.get("chanGainDb", kv.get("chanRangeDb", ""))
                 chan_lines.append(f"gainDb  = {v}")
-            if "chanEsN0Db" in kv:
+            if "chanSnrDb" in kv:
                 try:
-                    v = float(kv["chanEsN0Db"])
+                    v = float(kv["chanSnrDb"])
                     if math.isfinite(v):
-                        chan_lines.append(f"Es/N0   = {v:.2f} dB (config)")
+                        chan_lines.append(f"SNR     = {v:.2f} dB (applied)")
                 except Exception:
                     pass
             if "samplerMsps" in kv:
                 chan_lines.append(f"samplerMsps = {kv['samplerMsps']}")
 
-            rx_lines = ["", "[Receiver]"]
+            rx_lines = ["[Receiver]"]
             for key, label in [
                 ("symRateMsps", "symRateMsps"),
                 ("symRateCorrPpm", "symRateCorrPpm"),
@@ -348,7 +417,8 @@ while True:
                         rx_lines.append(f"{'SNR_est':14s}= {snr_e:.2f} dB (EVM)")
                 except Exception:
                     pass
-            info_text.set_text("\n".join(chan_lines + rx_lines))
+            info_text_left.set_text("\n".join(chan_lines))
+            info_text_right.set_text("\n".join(rx_lines))
 
         # History lines (no relim/autoscale every frame; update limits at low rate)
         if t_hist:
@@ -358,11 +428,18 @@ while True:
             line_gain_corr.set_data(t_hist, gain_corr)
             line_f_applied.set_data(t_hist, f_applied)
             line_f_corr.set_data(t_hist, f_corr)
+            
+            line_snr_applied.set_data(t_hist, snr_applied)
+            line_snr_est.set_data(t_hist, snr_est)
+            line_ber.set_data(t_hist, ber_hist)
+            line_lock_vit.set_data(t_hist, lock_vit)
+            line_lock_prbs.set_data(t_hist, lock_prbs)
 
             # X window
             tmax = t_hist[-1]
             xmin = max(0.0, tmax - x_window_sec)
             ax_ppm.set_xlim(xmin, tmax + 1e-6)
+            ax_snr.set_xlim(xmin, tmax + 1e-6)
 
             # Y limits update only once per second
             if (now - last_ylim_update) >= 1.0:
@@ -381,6 +458,19 @@ while True:
                 set_ylim(ax_ppm, ppm_applied + ppm_sum)
                 set_ylim(ax_gain, gain_applied + gain_corr)
                 set_ylim(ax_freq, f_applied + f_corr)
+                set_ylim(ax_snr, snr_applied + snr_est)
+                
+                # BER
+                vals_ber = [v for v in ber_hist if v == v and v > 0]
+                if vals_ber:
+                    min_b = max(1e-8, min(vals_ber) * 0.5)
+                    max_b = min(1.0, max(vals_ber) * 2.0)
+                    if max_b <= min_b:
+                        max_b = 1.0
+                        min_b = 1e-6
+                    ax_ber.set_ylim(min_b, max_b)
+                
+                ax_lock.set_ylim(-0.1, 1.1)
 
         apply_limits()
         fig.canvas.draw_idle()

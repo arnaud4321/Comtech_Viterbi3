@@ -12,6 +12,8 @@ namespace ConsoleAlert
 {
 /// Opening: red `[ALERT]` then red message body (reset with @ref kReset after the line).
 inline constexpr const char* kRedOpen = "\033[31m[ALERT]\033[0m \033[31m";
+/// Green styling for non-alert status markers (reset with @ref kReset).
+inline constexpr const char* kGreenOpen = "\033[32m";
 inline constexpr const char* kReset = "\033[0m";
 } // namespace ConsoleAlert
 

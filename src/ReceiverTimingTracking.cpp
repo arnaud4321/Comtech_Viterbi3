@@ -20,6 +20,7 @@
 #include <immintrin.h>
 #include <sys/stat.h>
 #include <thread>
+extern mutex mtxfilethr;
 
 namespace
 {
@@ -58,7 +59,7 @@ void ReceiverTimingTracking::ResetGardner(double nominalRatio, double kp, double
 }
 
 void ReceiverTimingTracking::Start(BufferFloat* filterRing, std::mutex* mtxFilterRing,
-                                   std::condition_variable* cvFilterData, bool* stopAll,
+                                   std::condition_variable* cvFilterData, std::atomic<bool>* stopAll,
                                    double displayPeriodSec)
 {
     StopJoin();
@@ -139,6 +140,15 @@ bool ReceiverTimingTracking::pushOneFrameToQueue(const float* i, const float* q)
  */
 void ReceiverTimingTracking::ThreadMain()
 {
+
+    #ifdef WRITE_LOG_THR
+	mtxfilethr.lock();
+    FILE *fidthr = fopen("LogThreadsInfo.txt","at");
+    fprintf(fidthr,"Receiver Timing Tracking  Thread %d\n", gettid());
+    fclose(fidthr);
+    mtxfilethr.unlock();
+    #endif
+
     alignas(32) float filterChunkI[ReceiverInputBatchIQSamples];
     alignas(32) float filterChunkQ[ReceiverInputBatchIQSamples];
     uint64_t samples_total = 0;
@@ -263,11 +273,8 @@ void ReceiverTimingTracking::ThreadMain()
                 lastStatusDisplay = now;
             }
         }
-        if (!gardner_.IsLocked())
-        {
-            pendingCount_ = 0;
-            nSym = 0;
-        }
+        // Always produce symbols/frames, even when Gardner is not locked.
+        // Downstream blocks can use IsLocked() to decide how to interpret status, but they should not stall.
         if (nSym > 0)
         {
             const int copyCount = std::min(nSym, kPendingCap - pendingCount_);

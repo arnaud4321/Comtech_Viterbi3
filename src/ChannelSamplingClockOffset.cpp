@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+extern mutex mtxfilethr;
 
 void ChannelSamplingClockOffset::ScoRingBuffer::PushBlock(const float* inI, const float* inQ, int n)
 {
@@ -94,7 +95,7 @@ void ChannelSamplingClockOffset::UpdateTotalPpm(double totalPpm)
 
 void ChannelSamplingClockOffset::Start(BufferShort* outputBuffer, std::mutex* outputMutex,
                                        std::condition_variable* cvSpace,
-                                       std::condition_variable* cvData, bool* stopAll)
+                                       std::condition_variable* cvData, std::atomic<bool>* stopAll)
 {
     StopJoin();
     pOutBuf_ = outputBuffer;
@@ -155,6 +156,16 @@ void ChannelSamplingClockOffset::EnqueueNoisyInterleaved(const float* interleave
  */
 void ChannelSamplingClockOffset::ThreadMain()
 {
+
+    #ifdef WRITE_LOG_THR
+	mtxfilethr.lock();
+    FILE *fidthr = fopen("LogThreadsInfo.txt","at");
+    fprintf(fidthr,"ChannelSamplingClockOffset  Thread %d\n", gettid());
+    fclose(fidthr);
+    mtxfilethr.unlock();
+    #endif
+
+
     alignas(32) float deintI[kComplexPerBatch];
     alignas(32) float deintQ[kComplexPerBatch];
     alignas(32) float scoChunkI[kScoOutMax];

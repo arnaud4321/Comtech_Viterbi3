@@ -18,6 +18,7 @@
 #include <mutex>
 #include <atomic>
 using namespace std;
+#include "ConsoleAlert.h"
 #include "Params.h"
 #include "Transmitter.h"
 #include "AWGNChannel.h"
@@ -72,6 +73,7 @@ int main(int argc, char* argv[])
 	Receiver oRx;
 	oRx.SetSampler(&objSampler);
 	oRx.SetChannel(&oAWGN);
+	oRx.SetTransmitter(&oTx);
 	oRx.StartThreads(objParams.RollOff, objParams.TxMode, objParams.SymRateCfg, objParams.DisplayPeriodSec, objParams.CentralFreqCfg, objParams.ConstellationCfg);
 	
 	auto Start = std::chrono::high_resolution_clock::now();
@@ -100,10 +102,45 @@ int main(int argc, char* argv[])
 			auto Now = std::chrono::high_resolution_clock::now();
 			std::chrono::duration<double> elapsed = Now - Start;
 			const double t_rate = static_cast<double>(oRx.NumBitsAll) / SymbolRate;
+			auto awgnState = oAWGN.GetCurrentApplied();
+			double snrDb = awgnState.SnrDb;
+			double evmRms = oRx.GetPhaseTrackingEvmRms();
+			double snrEvmDb = (evmRms > 1e-12) ? (-20.0 * std::log10(evmRms)) : std::numeric_limits<double>::quiet_NaN();
+#ifdef ENABLE_RAW_PREVITERBI_METRICS
+			const bool rawLocked = oRx.RawSyncLocked.load(std::memory_order_relaxed);
+			cout << std::fixed << std::setprecision(6)
+			     << "[Main][RAW] t_sim=" << elapsed.count() << " s"
+			     << " t_rate=" << t_rate << " s"
+			     << " snrDb=" << snrDb
+			     << " snrEvmDb=" << snrEvmDb
+			     << " RAW_LOCK=" << (rawLocked ? (std::string(ConsoleAlert::kGreenOpen) + "1" + ConsoleAlert::kReset) : "0")
+			     << " syms=" << oRx.RawNumSymsAll
+			     << " symErr=" << oRx.RawNumSymErrorsAll
+			     << " SER=" << std::scientific << std::setprecision(6)
+			     << (static_cast<double>(oRx.RawNumSymErrorsAll) / std::max(1.0, static_cast<double>(oRx.RawNumSymsAll)))
+			     << std::defaultfloat
+			     << " syncPeakAbs=" << std::scientific << std::setprecision(6) << oRx.RawSyncPeakAbs.load(std::memory_order_relaxed)
+			     << std::defaultfloat
+			     << " syncPeakToMean=" << std::scientific << std::setprecision(6) << oRx.RawSyncBestAbs.load(std::memory_order_relaxed)
+			     << std::defaultfloat
+			     << " syncThrPeakToMean=" << std::scientific << std::setprecision(6) << oRx.RawSyncThrAbs.load(std::memory_order_relaxed)
+			     << std::defaultfloat
+			     << " syncPhaseRad=" << std::fixed << std::setprecision(6) << oRx.RawSyncPeakPhaseRad.load(std::memory_order_relaxed)
+			     << " syncAppliedPhaseRad=" << std::fixed << std::setprecision(6) << oRx.RawSyncAppliedPhaseRad.load(std::memory_order_relaxed)
+			     << " syncAppliedQuad=" << oRx.RawSyncAppliedQuad.load(std::memory_order_relaxed)
+			     << " syncLagSym=" << oRx.RawSyncLagSym.load(std::memory_order_relaxed)
+			     << " bits=" << oRx.RawNumBitsAll
+			     << " bitErr=" << oRx.RawNumErrorsAll
+			     << " rawBER=" << std::scientific << std::setprecision(6)
+			     << (static_cast<double>(oRx.RawNumErrorsAll) / std::max(1.0, static_cast<double>(oRx.RawNumBitsAll)))
+			     << std::defaultfloat
+			     << endl;
+#endif
 			cout << std::fixed << std::setprecision(6)
 			     << "[Main] t_sim=" << elapsed.count() << " s"
 			     << " t_rate=" << t_rate << " s"
-			     << " EsN0=" << objParams.EsN0
+			     << " snrDb=" << snrDb
+			     << " snrEvmDb=" << snrEvmDb
 			     << " bits=" << oRx.NumBitsAll
 			     << " errors=" << oRx.NumErrorsAll
 			     << " BER=" << std::scientific << std::setprecision(6)

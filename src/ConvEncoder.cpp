@@ -34,6 +34,7 @@ ConvEncoder::~ConvEncoder(void)
 {
 
 	delete [] OutputTable;
+	delete [] NextStates;
 	
 	ippsFree(NextStates8);
 	ippsFree(Outputs8);
@@ -41,6 +42,7 @@ ConvEncoder::~ConvEncoder(void)
 #ifdef DEBUG_CONV_ENC
 
 	ippsFree(OutAll);
+	ippsFree(OutAll0);
 
 #endif
 }

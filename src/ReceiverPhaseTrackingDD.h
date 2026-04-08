@@ -38,7 +38,7 @@ public:
 
     /// Start the phase-tracking thread.
     /// Input is pulled from timingTracking (WaitPopSymbolFrame).
-    void Start(ReceiverTimingTracking* timingTracking, bool* stopAll,
+    void Start(ReceiverTimingTracking* timingTracking, std::atomic<bool>* stopAll,
                double displayPeriodSec = 1.0);
 
     void StopJoin();
@@ -49,6 +49,15 @@ public:
 
     bool IsLocked() const { return locked_.load(std::memory_order_relaxed); }
     double GetLastFreqEstHz() const { return lastFreqEstHz_.load(std::memory_order_relaxed); }
+    /**
+     * @brief Get the last computed Error Vector Magnitude (EVM) RMS.
+     * 
+     * Computed independently of the AGC scaling using the ratio of signal power and
+     * the mean symbol magnitude, ensuring an accurate SNR estimation even at high SNR.
+     * 
+     * @return double EVM RMS value
+     */
+    double GetLastEvmRms() const { return lastEvmRms_.load(std::memory_order_relaxed); }
 
     void ThreadMain();
 
@@ -63,7 +72,7 @@ private:
     };
 
     ReceiverTimingTracking* timingTracking_ = nullptr;
-    bool* stopAll_ = nullptr;
+    std::atomic<bool>* stopAll_ = nullptr;
 
     // 2nd-order PLL state (radians, radians/sample)
     float phaseRad_ = 0.0f;
@@ -81,6 +90,7 @@ private:
     int lockCountRequired_ = 10 * kSymFrame; // ~10 frames worth of symbols
     std::atomic<bool> locked_{false};
     std::atomic<double> lastFreqEstHz_{0.0};
+    std::atomic<double> lastEvmRms_{0.0};
 
     // Phase rotator LUT (cos/sin table)
     static constexpr int kLutSize = 16384;

@@ -5,6 +5,19 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "(gdb debug ext) release",
+            "type": "gdb",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/release/viterbi3",
+            "args": ["config.json"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/src",
+            "env": {
+                "LD_LIBRARY_PATH": "/opt/intel/oneapi/ipp/latest/lib/intel64:${env:LD_LIBRARY_PATH}"
+            }
+        },
+
+        {
             "name": "(gdb) debug",
             "type": "cppdbg",
             "request": "launch",
@@ -57,6 +70,18 @@
                     "ignoreFailures": true
                 }
             ]
+        }
+        ,
+        {
+            "name": "(lldb) release",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/release/viterbi3",
+            "args": ["config.json"],
+            "cwd": "${workspaceFolder}/src",
+            "env": {
+                "LD_LIBRARY_PATH": "/opt/intel/oneapi/ipp/latest/lib/intel64:${env:LD_LIBRARY_PATH}"
+            }
         }
 
     ]

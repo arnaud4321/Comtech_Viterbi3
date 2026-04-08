@@ -83,7 +83,8 @@ The configuration file is read by `Params::ReadParams` and defines:
   - `Method`: 0 = PRBS, 1 = file (`FileName`)
   - `RollOff`: RRC roll-off
 - **Channel**
-  - `Esn0`: Es/N0 in dB
+  - `Esn0`: Base Es/N0 in dB
+  - `ApplyGainBeforeNoise`: if true, channel gain is applied to the signal before adding noise (effectively varying the SNR). If false, gain is applied to signal+noise.
   - `InitialGainDb`: initial channel gain (dB)
   - `DynamicRangeDb`: gain span applied over the ramp segments (dB)
   - `InitialFrequencyShift`, `FrequencyShift`: carrier offset profile (Hz)

@@ -28,8 +28,8 @@ using namespace std;
  *
  * **Frequency and level profiles:** Four simulation-time segments (stable / ramp / stable / ramp) set both
  * carrier offset (@c InitialFrequencyShift + ramped @c FrequencyShift) and **gain** in dB
- * (@c InitialGainDb + ramped @c DynamicRangeDb), applied as amplitude @f$10^{\mathrm{gainDb}/20}@f$ on floats
- * before the NCO. @ref FrequencyOffset applies rotation per chunk; total SCO ppm is @c ClockMismatchPpm plus a
+ * (@c InitialGainDb + ramped @c DynamicRangeDb). If @c ApplyGainBeforeNoise is true in @ref Params, the
+ * gain is applied to the signal *before* noise addition (varying SNR); otherwise it scales signal+noise. @ref FrequencyOffset applies rotation per chunk; total SCO ppm is @c ClockMismatchPpm plus a
  * Doppler-like term from offset Hz / (@c CarrierToSymbolRateRatio · @c SymbolRate). Applied values are
  * published via atomics for monitoring.
  *
@@ -67,7 +67,7 @@ private:
     void GenerateOutput(void);
     void ApplyFrequencyOffset(void);
     SimpleQueue NoiseQ;
-    bool StopAll = false;
+    std::atomic<bool> StopAll{false};
     condition_variable CvOutNoise, CvNoiseOut, CvOutUser, CvUserOut;
     // Queue between OutputThread (noise+gain) and FreqOffsetThread (carrier rotation)
     std::mutex mtxFreqQ_;
@@ -126,7 +126,7 @@ public:
      * @param nShorts Number of shorts to copy.
      * @param stopAll Stop flag observed while waiting.
      */
-    bool CopyOutputSamples(short* dst, int nShorts, bool& stopAll);
+    bool CopyOutputSamples(short* dst, int nShorts, std::atomic<bool>& stopAll);
 
     /** @brief Snapshot of channel state for overlays (atomics under internal lock in getter). */
     struct CurrentApplied
@@ -136,6 +136,7 @@ public:
         double GainDb = 0.0;
         int Segment = 0; // 0=stable1,1=acc1,2=stable2,3=acc2
         double TRate = 0.0;
+        double SnrDb = 0.0;
     };
 
     CurrentApplied GetCurrentApplied() const
@@ -146,6 +147,11 @@ public:
         s.GainDb = currGainDb_.load(std::memory_order_relaxed);
         s.Segment = currSegment_.load(std::memory_order_relaxed);
         s.TRate = currTRate_.load(std::memory_order_relaxed);
+        
+        double baseEsN0 = pParams ? pParams->EsN0 : EsN0db;
+        bool applyGainBeforeNoise = pParams ? pParams->ApplyGainBeforeNoise : false;
+        s.SnrDb = applyGainBeforeNoise ? (baseEsN0 + s.GainDb) : baseEsN0;
+        
         return s;
     }
 

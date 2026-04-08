@@ -1,3 +1,4 @@
+#include <deque>
 /**
  * @file Receiver.cpp
  * @brief Receive chain: filter thread, symbol-rate estimate, resampler, NCO/AGC, Gardner, phase DD, three Viterbi, output.
@@ -48,40 +49,6 @@ static void InjectPRBSErrorDeterministic(unsigned char* buf, int length);
 
 namespace
 {
-/** RMS EVM vs QPSK hard decisions scaled to the frame mean power; @c snrFromEvmDb = -20*log10(EVM_rms). */
-void QpskEvmSnrFromFrame(const float* i, const float* q, int n, double& evmRms, double& snrFromEvmDb)
-{
-    if (!i || !q || n <= 0)
-    {
-        evmRms = 0.0;
-        snrFromEvmDb = 0.0;
-        return;
-    }
-    double sumI2 = 0.0, sumQ2 = 0.0;
-    for (int k = 0; k < n; ++k)
-    {
-        sumI2 += static_cast<double>(i[k]) * i[k];
-        sumQ2 += static_cast<double>(q[k]) * q[k];
-    }
-    const double meanP = (sumI2 + sumQ2) / static_cast<double>(n);
-    const double R = std::sqrt(std::max(meanP * 0.5, 1e-30));
-    double errSum = 0.0, sigSum = 0.0;
-    for (int k = 0; k < n; ++k)
-    {
-        const double di = (i[k] >= 0.0f) ? 1.0 : -1.0;
-        const double dq = (q[k] >= 0.0f) ? 1.0 : -1.0;
-        const double si = di * R;
-        const double sq = dq * R;
-        const double ei = static_cast<double>(i[k]) - si;
-        const double eq = static_cast<double>(q[k]) - sq;
-        errSum += ei * ei + eq * eq;
-        sigSum += si * si + sq * sq;
-    }
-    const double sigMean = sigSum / static_cast<double>(n);
-    const double errMean = errSum / static_cast<double>(n);
-    evmRms = std::sqrt(errMean / std::max(sigMean, 1e-30));
-    snrFromEvmDb = -20.0 * std::log10(std::max(evmRms, 1e-15));
-}
 } // namespace
 
 Receiver::Receiver(/* args */):oBufferFilter(kRxRingFloatLen, kRxRingFloatExtra),OutputQ(LengthQueue)
@@ -178,6 +145,8 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
     objRxFilter.CreateObjects(RollOff);
     ViterbiSynchronized = false;
     PRBSSynchronized = false;
+    RawNumBitsAll = 0;
+    RawNumErrorsAll = 0;
     for(int i = 0; i < 3; i++)
     {
         DemodulatorQ[i].Reset();
@@ -555,6 +524,7 @@ void Receiver::OperateViterbi(void *p)
         int PtrRd = DemodulatorQ[IndexViterbi].GetPtrRd()*BatchSize1;
         if(!ViterbiSynchronized)
         {
+            lk.unlock();
             oViterbi[IndexViterbi].reset_decoder();
             float m[4] = {};
             oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, false, 1, 1, m[0]);
@@ -564,6 +534,8 @@ void Receiver::OperateViterbi(void *p)
             oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, true, -1, 1, m[2]);
             oViterbi[IndexViterbi].reset_decoder();
             oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, true,   1, 1, m[3]);
+            
+            lk.lock();
             for (int k = 0; k < 4; ++k)
                 VitSyncResults[IndexViterbi].Metrics[k] = m[k];
             VitSyncResults[IndexViterbi].Available = true;
@@ -573,15 +545,23 @@ void Receiver::OperateViterbi(void *p)
         }
         else
         {
-            oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, ViterbiParams.ExchangeIQ, ViterbiParams.SignI, ViterbiParams.SignQ, VitSyncResults[IndexViterbi].Metrics[0]);
+            ViterbiParameters vp = ViterbiParams;
+            lk.unlock();
             
+            oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, vp.ExchangeIQ, vp.SignI, vp.SignQ, VitSyncResults[IndexViterbi].Metrics[0]);
+            
+            lk.lock();
             CvViterbis2VitManager[IndexViterbi].wait(lk, [&] {
                 return StopAll || DecodedQ[IndexViterbi].AvailableWrite();
             });
             if (StopAll)
                 break;
             int PtrWr = BatchSize1 * static_cast<int>(DecodedQ[IndexViterbi].GetPtrWr());
+            lk.unlock();
+            
             DifferentialDecode(ViterbiOutputs[IndexViterbi],DiffDec[IndexViterbi]+PtrWr, BatchSize1, Last);
+            
+            lk.lock();
             DemodulatorQ[IndexViterbi].AdvanceRead();
             DecodedQ[IndexViterbi].AdvanceWrite();
             lk.unlock();
@@ -599,6 +579,8 @@ void Receiver::OperateViterbiManager(void)
     NumBitsAll = 0;
     NumErrorsAll = 0;
     unsigned int PRBSSeed = 0;
+    RawNumBitsAll = 0;
+    RawNumErrorsAll = 0;
     #ifdef WRITE_LOG_THR
 	mtxfilethr.lock();
     FILE *fidthr = fopen("LogThreadsInfo.txt","at");
@@ -635,6 +617,369 @@ void Receiver::OperateViterbiManager(void)
         if (!phaseTrackingDD_.WaitPopSymbolFrame(pendingI, pendingQ, kSymFrame))
             break;
         symbols_total += static_cast<uint64_t>(kSymFrame);
+
+        // RAW (pre-Viterbi) diagnostics (optional).
+        // Compile-time options:
+        // - ENABLE_RAW_PREVITERBI_METRICS: enables the whole RAW block below.
+        // - DUMP_RAW_INTERCORR: additionally writes the exact TX/RX windows used for correlation to ../data/.
+#ifdef ENABLE_RAW_PREVITERBI_METRICS
+        if (RxMode != FILE_TX && pTx_ != nullptr)
+        {
+            // Requested behavior:
+            // - While PhaseTrackingDD is NOT locked: for each RX frame processed, pop and discard one TX frame.
+            // - On the first RX frame after PhaseTrackingDD becomes locked: pop the next TX frame, dump and
+            //   compute inter-correlation on those exact RX/TX symbols. If inter-corr fails, exit(-1).
+            static bool phaseWasLocked = false;
+            static bool rawCorrDone = false;
+            static int rawSkipLockedFrames = 0;
+
+            const bool phaseLocked = phaseTrackingDD_.IsLocked();
+
+            alignas(32) float txFrameI[kSymFrame];
+            alignas(32) float txFrameQ[kSymFrame];
+            static constexpr int kCorrFrames = 4;
+            static constexpr int kCorrLen2 = kCorrFrames * kSymFrame;
+            // Search lag over +/- N whole frames (pipeline delay can be several frames).
+            static constexpr int kMaxLagFrames = 32;
+            static constexpr int kMaxLag2 = kMaxLagFrames * kSymFrame;
+            static constexpr int kTxLen2 = kCorrLen2 + 2 * kMaxLag2;
+            static constexpr int kTxFramesNeeded = (kTxLen2 + kSymFrame - 1) / kSymFrame;
+
+            static std::vector<float> rxIacc;
+            static std::vector<float> rxQacc;
+            static std::vector<float> txIacc;
+            static std::vector<float> txQacc;
+            static std::deque<float> txDelayQueueI;
+            static std::deque<float> txDelayQueueQ;
+            static double savedPhaseAdj = 0.0;
+            
+            bool haveEnough = false;
+
+            if (!phaseLocked && !rawCorrDone)
+            {
+                (void)pTx_->WaitPopTxSymbolFrame(txFrameI, txFrameQ, kSymFrame);
+                phaseWasLocked = false;
+                rawCorrDone = false;
+                rawSkipLockedFrames = 0;
+                RawSyncLocked.store(false, std::memory_order_relaxed);
+                goto skip_raw;
+            }
+
+            // Transition: first iteration after lock -> start accumulation window.
+            if (!phaseWasLocked)
+            {
+                phaseWasLocked = true;
+                rawCorrDone = false;
+                // Requested: drop one extra RX+TX frame after lock before accumulating/dumping.
+                rawSkipLockedFrames = 1;
+                RawSyncLocked.store(false, std::memory_order_relaxed);
+                rxIacc.clear();
+                rxQacc.clear();
+                txIacc.clear();
+                txQacc.clear();
+                rxIacc.reserve(static_cast<size_t>(kCorrLen2));
+                rxQacc.reserve(static_cast<size_t>(kCorrLen2));
+                txIacc.reserve(static_cast<size_t>(kTxLen2));
+                txQacc.reserve(static_cast<size_t>(kTxLen2));
+                txDelayQueueI.clear();
+                txDelayQueueQ.clear();
+            }
+
+            if (rawSkipLockedFrames > 0)
+            {
+                // Discard one TX frame to keep pairing, and also discard this RX frame.
+                (void)pTx_->WaitPopTxSymbolFrame(txFrameI, txFrameQ, kSymFrame);
+                rawSkipLockedFrames--;
+                goto skip_raw;
+            }
+
+            // After the one-shot raw correlation/dump, we must keep draining TX frames; otherwise the TX
+            // reference ring fills up and backpressures/stalls the transmitter thread.
+            // We now maintain a continuous delay line to calculate SER/rawBER over the whole simulation.
+            if (rawCorrDone)
+            {
+                if (pTx_->TryPopTxSymbolFrame(txFrameI, txFrameQ, kSymFrame))
+                {
+                    txDelayQueueI.insert(txDelayQueueI.end(), txFrameI, txFrameI + kSymFrame);
+                    txDelayQueueQ.insert(txDelayQueueQ.end(), txFrameQ, txFrameQ + kSymFrame);
+
+                    // Wait until we have enough TX symbols to cover the current RX frame.
+                    if (txDelayQueueI.size() >= static_cast<size_t>(kSymFrame))
+                    {
+                        const float c = static_cast<float>(std::cos(-savedPhaseAdj));
+                        const float s = static_cast<float>(std::sin(-savedPhaseAdj));
+
+                        uint64_t symErrCount = 0;
+                        uint64_t bitErrCount = 0;
+
+                        for (int k = 0; k < kSymFrame; ++k)
+                        {
+                            const float rI0 = pendingI[k];
+                            const float rQ0 = pendingQ[k];
+                            const float rIr = rI0 * c + rQ0 * s;
+                            const float rQr = rQ0 * c - rI0 * s;
+
+                            const float rxIh = (rIr >= 0.0f) ? 1.0f : -1.0f;
+                            const float rxQh = (rQr >= 0.0f) ? 1.0f : -1.0f;
+                            
+                            const float txIh = (txDelayQueueI[k] >= 0.0f) ? 1.0f : -1.0f;
+                            const float txQh = (txDelayQueueQ[k] >= 0.0f) ? 1.0f : -1.0f;
+
+                            // Apply the same quadrant ambiguity resolution to TX symbol (actually applied to rx, so rx should match tx)
+                            // But wait! `phaseAdj` already includes both the continuous phase offset AND the k*pi/2 quadrant rotation.
+                            // So `rIr` and `rQr` are ALREADY rotated to the correct quadrant.
+                            // Thus, `rxIh` and `rxQh` should EXACTLY match `txIh` and `txQh`!
+                            
+                            // Let's check: in the one-shot lock, the phase is found such that rx * exp(-j*phase) matches tx.
+                            // phaseAdj = phase + quad * pi/2.
+                            // So we just need to do rx_rot = rx * exp(-j*phaseAdj).
+                            // Which is exactly what is done above!
+                            const bool symErr = (rxIh != txIh) || (rxQh != txQh);
+                            symErrCount += static_cast<uint64_t>(symErr);
+                            bitErrCount += static_cast<uint64_t>(rxIh != txIh) + static_cast<uint64_t>(rxQh != txQh);
+                        }
+
+                        RawNumSymsAll += static_cast<uint64_t>(kSymFrame);
+                        RawNumSymErrorsAll += symErrCount;
+                        RawNumBitsAll += static_cast<uint64_t>(2 * kSymFrame);
+                        RawNumErrorsAll += bitErrCount;
+
+                        txDelayQueueI.erase(txDelayQueueI.begin(), txDelayQueueI.begin() + kSymFrame);
+                        txDelayQueueQ.erase(txDelayQueueQ.begin(), txDelayQueueQ.begin() + kSymFrame);
+                    }
+                }
+                goto skip_raw;
+            }
+
+            // Accumulate RX symbols (full frames) and matching TX frames.
+            // New logic: keep popping both until we have enough for txIacc.
+            // Since we need them to be 1:1 aligned, we push to rxIacc until it has the same size as txIacc.
+            if (static_cast<int>(txIacc.size()) < kTxLen2)
+            {
+                for (int k = 0; k < kSymFrame; ++k)
+                {
+                    rxIacc.push_back(pendingI[k]);
+                    rxQacc.push_back(pendingQ[k]);
+                }
+
+                if (pTx_->WaitPopTxSymbolFrame(txFrameI, txFrameQ, kSymFrame))
+                {
+                    for (int k = 0; k < kSymFrame && static_cast<int>(txIacc.size()) < kTxLen2; ++k)
+                    {
+                        txIacc.push_back(txFrameI[k]);
+                        txQacc.push_back(txFrameQ[k]);
+                    }
+                }
+                else
+                {
+                    break; // Error
+                }
+            }
+
+            haveEnough = (static_cast<int>(txIacc.size()) >= kTxLen2);
+            if (!haveEnough)
+            {
+                goto skip_raw;
+            }
+
+            if (haveEnough)
+            {
+                // Aliases for clarity below.
+                const float* rxI2 = rxIacc.data();
+                const float* rxQ2 = rxQacc.data();
+                const float* txI2 = txIacc.data();
+                const float* txQ2 = txQacc.data();
+
+#ifdef DUMP_RAW_INTERCORR
+            mkdir("../data", 0755);
+            {
+                FILE* ftx = std::fopen("../data/raw_icorr_tx.bin", "wb");
+                FILE* frx = std::fopen("../data/raw_icorr_rx.bin", "wb");
+                FILE* fmeta = std::fopen("../data/raw_icorr_meta.txt", "wt");
+                if (fmeta)
+                {
+                    std::fprintf(fmeta, "kCorrLen=%d\nkMaxLag=%d\nnTx=%d\nphaseLocked=1\n",
+                                 kCorrLen2, kMaxLag2, kTxLen2);
+                    std::fclose(fmeta);
+                }
+                if (ftx)
+                {
+                    for (int k = 0; k < kTxLen2; ++k)
+                    {
+                        float iq[2] = {txI2[k], txQ2[k]};
+                        std::fwrite(iq, sizeof(float), 2, ftx);
+                    }
+                    std::fclose(ftx);
+                }
+                if (frx)
+                {
+                    for (int k = 0; k < kCorrLen2; ++k)
+                    {
+                        float iq[2] = {rxI2[k], rxQ2[k]};
+                        std::fwrite(iq, sizeof(float), 2, frx);
+                    }
+                    std::fclose(frx);
+                }
+            }
+#endif
+
+            double es = 0.0;
+            for (int k = 0; k < kCorrLen2; ++k)
+                es += static_cast<double>(txI2[kMaxLag2 + k] * txI2[kMaxLag2 + k] + txQ2[kMaxLag2 + k] * txQ2[kMaxLag2 + k]);
+            es /= static_cast<double>(kCorrLen2);
+
+            double bestMag = -1.0, bestRe = 0.0, bestIm = 0.0;
+            int bestLag = 0;
+            double sumMag = 0.0;
+            int nMag = 0;
+            for (int lag = -kMaxLag2; lag <= kMaxLag2; ++lag)
+            {
+                const int txBase = kMaxLag2 + lag;
+                double re = 0.0, im = 0.0;
+                for (int k = 0; k < kCorrLen2; ++k)
+                {
+                    const double ar = rxI2[k];
+                    const double ai = rxQ2[k];
+                    const double br = txI2[txBase + k];
+                    const double bi = txQ2[txBase + k];
+                    re += ar * br + ai * bi;
+                    im += ai * br - ar * bi;
+                }
+                const double mag = std::sqrt(re * re + im * im);
+                sumMag += mag;
+                nMag++;
+                if (mag > bestMag)
+                {
+                    bestMag = mag;
+                    bestRe = re;
+                    bestIm = im;
+                    bestLag = lag;
+                }
+            }
+
+            const double meanMag = (nMag > 0) ? (sumMag / static_cast<double>(nMag)) : 0.0;
+            const double peakToMean = (meanMag > 1e-30) ? (bestMag / meanMag) : 0.0;
+            constexpr double kPeakToMeanThr = 50.0;
+
+            // For display: BestAbs=peak/mean, ThrAbs=threshold, PeakAbs=absolute peak.
+            RawSyncPeakAbs.store(bestMag, std::memory_order_relaxed);
+            RawSyncBestAbs.store(peakToMean, std::memory_order_relaxed);
+            RawSyncThrAbs.store(kPeakToMeanThr, std::memory_order_relaxed);
+            RawSyncLagSym.store(bestLag, std::memory_order_relaxed);
+            RawSyncPeakPhaseRad.store(std::atan2(bestIm, bestRe), std::memory_order_relaxed);
+
+            if (!(peakToMean > kPeakToMeanThr))
+            {
+                // Reset state and skip so we try again next time PhaseDD is locked
+                goto skip_raw;
+            }
+
+            RawSyncLocked.store(true, std::memory_order_relaxed);
+            rawCorrDone = true;
+
+            std::cout << "[RAW] \033[32mLOCKED\033[0m"
+                      << " peakToMean=" << peakToMean
+                      << " thr=" << kPeakToMeanThr
+                      << " peakAbs=" << bestMag
+                      << " phaseRad=" << std::atan2(bestIm, bestRe)
+                      << " lagSym=" << bestLag
+                      << std::endl;
+
+            // Compute SER + raw BER on the aligned window using hard decisions.
+            const double phase = std::atan2(bestIm, bestRe);
+            const int txBase = kMaxLag2 + bestLag;
+
+            // corr(lag) = sum rx * conj(tx) gives phase = phi_rx - phi_tx, but QPSK has a quadrant ambiguity.
+            // Resolve ambiguity by trying phase + k*pi/2 and picking the smallest SER.
+            int bestQuad = 0;
+            uint64_t bestSymErr = UINT64_MAX;
+            uint64_t bestBitErr = UINT64_MAX;
+            for (int quad = 0; quad < 4; ++quad)
+            {
+                const double phaseAdj = phase + (static_cast<double>(quad) * (M_PI / 2.0));
+                const float c = static_cast<float>(std::cos(-phaseAdj));
+                const float s = static_cast<float>(std::sin(-phaseAdj));
+
+                uint64_t symErrCount = 0;
+                uint64_t bitErrCount = 0;
+                for (int k = 0; k < kCorrLen2; ++k)
+                {
+                    const float rI0 = rxI2[k];
+                    const float rQ0 = rxQ2[k];
+                    // (rI + j rQ) * exp(-j*phaseAdj)
+                    const float rIr = rI0 * c + rQ0 * s;
+                    const float rQr = rQ0 * c - rI0 * s;
+
+                    const float rxIh = (rIr >= 0.0f) ? 1.0f : -1.0f;
+                    const float rxQh = (rQr >= 0.0f) ? 1.0f : -1.0f;
+                    const float txIh = (txI2[txBase + k] >= 0.0f) ? 1.0f : -1.0f;
+                    const float txQh = (txQ2[txBase + k] >= 0.0f) ? 1.0f : -1.0f;
+
+                    const bool symErr = (rxIh != txIh) || (rxQh != txQh);
+                    symErrCount += static_cast<uint64_t>(symErr);
+                    bitErrCount += static_cast<uint64_t>(rxIh != txIh) + static_cast<uint64_t>(rxQh != txQh);
+                }
+
+                if (symErrCount < bestSymErr || (symErrCount == bestSymErr && bitErrCount < bestBitErr))
+                {
+                    bestSymErr = symErrCount;
+                    bestBitErr = bitErrCount;
+                    bestQuad = quad;
+                }
+            }
+
+            const double phaseAdj = phase + (static_cast<double>(bestQuad) * (M_PI / 2.0));
+            RawSyncAppliedPhaseRad.store(phaseAdj, std::memory_order_relaxed);
+            RawSyncAppliedQuad.store(bestQuad, std::memory_order_relaxed);
+
+            RawNumSymsAll += static_cast<uint64_t>(kCorrLen2);
+            RawNumSymErrorsAll += bestSymErr;
+            RawNumBitsAll += static_cast<uint64_t>(2 * kCorrLen2);
+            RawNumErrorsAll += bestBitErr;
+
+            // Prepare continuous delay queue with the unused 'future' TX history 
+            savedPhaseAdj = phaseAdj;
+            txDelayQueueI.clear();
+            txDelayQueueQ.clear();
+            
+            const int nextRxIdx = kTxLen2;
+            const int neededTxIdx = nextRxIdx + txBase;
+            
+            if (neededTxIdx < kTxLen2)
+            {
+                // We have the needed TX symbol in txIacc.
+                txDelayQueueI.insert(txDelayQueueI.end(), txIacc.begin() + neededTxIdx, txIacc.end());
+                txDelayQueueQ.insert(txDelayQueueQ.end(), txQacc.begin() + neededTxIdx, txQacc.end());
+            }
+            else
+            {
+                // We need to fetch more TX symbols to catch up.
+                int txToFetch = neededTxIdx - kTxLen2;
+                while (txToFetch > 0)
+                {
+                    int fetchNow = std::min(txToFetch, kSymFrame);
+                    if (pTx_->WaitPopTxSymbolFrame(txFrameI, txFrameQ, kSymFrame))
+                    {
+                        if (fetchNow < kSymFrame)
+                        {
+                            // Keep the remaining part in the delay queue
+                            txDelayQueueI.insert(txDelayQueueI.end(), txFrameI + fetchNow, txFrameI + kSymFrame);
+                            txDelayQueueQ.insert(txDelayQueueQ.end(), txFrameQ + fetchNow, txFrameQ + kSymFrame);
+                        }
+                        txToFetch -= fetchNow;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+
+            rawCorrDone = true;
+        }
+    }
+skip_raw:;
+#endif // ENABLE_RAW_PREVITERBI_METRICS
 
         if (constellationDisplay_ && constellationCfg_.PeriodSec > 0.0)
         {
@@ -686,7 +1031,7 @@ void Receiver::OperateViterbiManager(void)
                 double chanGainDb = 0.0;
                 int chanSeg = 0;
                 double chanTRate = 0.0;
-                double chanEsN0Db = std::numeric_limits<double>::quiet_NaN();
+                double chanSnrDb = std::numeric_limits<double>::quiet_NaN();
                 if (pChannel_)
                 {
                     const auto s = pChannel_->GetCurrentApplied();
@@ -695,11 +1040,11 @@ void Receiver::OperateViterbiManager(void)
                     chanGainDb = s.GainDb;
                     chanSeg = s.Segment;
                     chanTRate = s.TRate;
-                    chanEsN0Db = pChannel_->GetEsN0Db();
+                    chanSnrDb = s.SnrDb;
                 }
 
-                double evmRms = 0.0, snrFromEvmDb = 0.0;
-                QpskEvmSnrFromFrame(pendingI, pendingQ, kSymFrame, evmRms, snrFromEvmDb);
+                double evmRms = phaseTrackingDD_.GetLastEvmRms();
+                double snrFromEvmDb = (evmRms > 1e-12) ? (-20.0 * std::log10(evmRms)) : std::numeric_limits<double>::quiet_NaN();
 
                 char extra[768];
                 std::snprintf(extra, sizeof(extra),
@@ -709,13 +1054,13 @@ void Receiver::OperateViterbiManager(void)
                               "samplerMsps=%.3f rxFilterMsps=%.3f "
                               "centralReady=%d centralTargetHz=%.3f centralNcoHz=%.3f gainDb=%.3f phaseFreqHz=%.3f "
                               "chanFreqHz=%.3f chanTotalPpm=%.6f chanGainDb=%.3f chanSeg=%d chanTRate=%.3f "
-                              "chanEsN0Db=%.2f evmRms=%.6f snrFromEvmDb=%.2f",
+                              "chanSnrDb=%.2f evmRms=%.6f snrFromEvmDb=%.2f",
                               symRateMsps, symRatePpm, gardLocked, phaseLocked, vitLocked, prbsLocked,
                               symRateCorrPpm, gardnerPpm, rxTotalPpmCorr,
                               numBits, numErrors, ber,
                               samplerMsps, rxFilterMsps,
                               centralReady, centralTargetHz, centralNcoHz, gainDb, phaseFreqHz,
-                              chanFreqHz, chanTotalPpm, chanGainDb, chanSeg, chanTRate, chanEsN0Db, evmRms,
+                              chanFreqHz, chanTotalPpm, chanGainDb, chanSeg, chanTRate, chanSnrDb, evmRms,
                               snrFromEvmDb);
 
                 constellationDisplay_->UpdateEx(pendingI, pendingQ, kSymFrame, t_sim, t_rate, std::string(extra));
@@ -931,6 +1276,29 @@ void Receiver::OperateViterbiManager(void)
                     }
                     CurrDebugStatistics.NumBatches += 3;
                     CurrDebugStatistics.MeanMetricsGrowth =  CurrDebugStatistics.SumMetricsGrowth/double(CurrDebugStatistics.NumBatches);
+                    
+                    double currentGrowth = (VitSyncResults[0].Metrics[0] + VitSyncResults[1].Metrics[0] + VitSyncResults[2].Metrics[0]) / 3.0;
+                    if(CurrDebugStatistics.NumBatches <= 3) {
+                        CurrDebugStatistics.EmaMetricsGrowth = currentGrowth;
+                    } else {
+                        CurrDebugStatistics.EmaMetricsGrowth = 0.99 * CurrDebugStatistics.EmaMetricsGrowth + 0.01 * currentGrowth;
+                    }
+                    
+                    // Viterbi Unlock Condition
+                    constexpr double kViterbiDesyncGrowthThr = 40.0; // Calibrated for Viterbi cliff (SNR ~1.9dB, BER jumping to >2e-1)
+                    if (CurrDebugStatistics.EmaMetricsGrowth > kViterbiDesyncGrowthThr && CurrDebugStatistics.NumBatches > 100)
+                    {
+                        ViterbiSynchronized = false;
+                        PRBSSynchronized = false;
+                        NumBitsAll = 0;
+                        NumErrorsAll = 0;
+                        
+                        std::cout << "[ViterbiSync] \033[31mDESYNC\033[0m EmaMetricsGrowth=" << CurrDebugStatistics.EmaMetricsGrowth << " > " << kViterbiDesyncGrowthThr << std::endl;
+                        // Reset stats for next sync
+                        CurrDebugStatistics.NumBatches = 0;
+                        CurrDebugStatistics.SumMetricsGrowth = 0;
+                        CurrDebugStatistics.MaxMetricsGrowth = 0;
+                    }
                     #endif
 
                     if(StopAll)
@@ -969,7 +1337,12 @@ void Receiver::OperateViterbiManager(void)
                         // Option A: keep mtxQueues for all access to the slot OutputAll[outSlotByte..]
                         std::unique_lock<std::mutex> lkOutRead(mtxQueues);
                         int PtrRdOut = outSlotByte;
-                        if(!PRBSSynchronized)
+                        if (!ViterbiSynchronized)
+                        {
+                            // Viterbi just lost lock on this batch, or we are otherwise not locked.
+                            // Don't try to sync PRBS on garbage data.
+                        }
+                        else if(!PRBSSynchronized)
                         {
                             int PtrStart;
                             int NumErrorsAtLock = 0;
@@ -991,7 +1364,15 @@ void Receiver::OperateViterbiManager(void)
                         }
                         else {
                             oPrbs.CreateOutputs(PRBSSeed, BatchSize3, PrbsOut);
+                            uint64_t prevErrors = NumErrorsAll;
+                            uint64_t prevBits = NumBitsAll;
                             CountErrors(OutputAll+PtrRdOut, PrbsOut, BatchSize3);
+                            uint64_t diffErrors = NumErrorsAll - prevErrors;
+                            uint64_t diffBits = NumBitsAll - prevBits;
+                            if (diffBits > 0 && (static_cast<double>(diffErrors) / static_cast<double>(diffBits)) > 0.3) {
+                                PRBSSynchronized = false;
+                                std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER detected (" << diffErrors << "/" << diffBits << ")" << std::endl;
+                            }
                         }
                         OutputQ.AdvanceRead();
                         lkOutRead.unlock();
@@ -1088,6 +1469,7 @@ void Receiver::CountErrors(unsigned char *Input, unsigned char *Template, int Le
     NumBitsAll += Length;
 }
 
+
 /**
  * @brief Deterministic PRBS error injection used to test PRBS lock behavior.
  *
@@ -1110,7 +1492,6 @@ bool Receiver::SyncPRBS(unsigned char *In, int &PtrStart,unsigned int &Seed, int
 {
     bool Success = false;
     NumErrorsAtLock = 0;
-
 
     int Ptr = BatchSize1 - 23;
     while(!Success)

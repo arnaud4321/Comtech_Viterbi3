@@ -38,7 +38,7 @@ private:
     #endif
     
     bool Debug;
-    bool StopAll = false;
+    std::atomic<bool> StopAll{false};
     double TimeBatch;
     double displayPeriodSec_ = 1.0;
     /// Wall-time window for lastThroughputMsps_ (constellation overlay); console line uses displayPeriodSec_ when >0.
@@ -73,7 +73,7 @@ public:
      * @param nShorts Number of shorts to read (typically @c 2*SPB).
      * @param stopAll Global stop flag from caller context.
      */
-    bool ReadFilterBatch(short* dst, int nShorts, bool& stopAll);
+    bool ReadFilterBatch(short* dst, int nShorts, std::atomic<bool>& stopAll);
 
     /** @brief Wake threads waiting on ring space / data. */
     void NotifyFilterWaiters() { CvSamplerUser.notify_all(); }
