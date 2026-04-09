@@ -902,8 +902,8 @@ void Receiver::OperateViterbiManager(void)
                               << " peakToMean=" << peakToMean
                               << " thr=" << kPeakToMeanThr
                               << std::endl;
-                    RawSyncLocked.store(false, std::memory_order_relaxed);
                 }
+                RawSyncLocked.store(false, std::memory_order_relaxed);
                 // Reset state and skip so we try again next time PhaseDD is locked
                 goto skip_raw;
             }
