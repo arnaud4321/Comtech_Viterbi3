@@ -38,22 +38,23 @@ private:
     #endif
     
     bool Debug;
-    std::atomic<bool> StopAll{false};
     double TimeBatch;
     double displayPeriodSec_ = 1.0;
     /// Wall-time window for lastThroughputMsps_ (constellation overlay); console line uses displayPeriodSec_ when >0.
     double throughputMeasurePeriodSec_ = 1.0;
     thread SamplingThread;
     AWGNChannel *pChannel;
+    void OperateSampler(void);
+    std::atomic<double> lastThroughputMsps_{0.0};
+protected:
+    std::atomic<bool> StopAll{false};
     BufferShort oBuffer;
     std::mutex mtxSamplerBuffer_;
     condition_variable CvSamplerUser;
-    void OperateSampler(void);
-    std::atomic<double> lastThroughputMsps_{0.0};
 public:
     uint64_t NumBatches;
     Sampler(bool DebugIn);
-    ~Sampler();
+    virtual ~Sampler();
 
     /** @brief Console status period; \<=0 disables periodic @c [Sampler] throughput lines. */
     void SetDisplayPeriodSec(double sec) { displayPeriodSec_ = sec; }
@@ -61,8 +62,8 @@ public:
     /** @brief Wall-time window for @ref GetLastThroughputMsps (independent of console when decoupled). */
     void SetThroughputMeasurePeriodSec(double sec) { throughputMeasurePeriodSec_ = (sec > 1e-9) ? sec : 1.0; }
 
-    void StartThread(void);
-    void StopThread(void);
+    virtual void StartThread(void);
+    virtual void StopThread(void);
     void SetChannel(AWGNChannel *p)
     {
         pChannel = p;

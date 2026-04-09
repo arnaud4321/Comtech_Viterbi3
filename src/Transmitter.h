@@ -109,7 +109,7 @@ public:
             std::lock_guard<std::mutex> lk(mtxFilterQ_);
             FilterQ.AdvanceRead();
         }
-        CvOutFilter.notify_one();
+        CvOutFilter.notify_all();
     }
     // Atomic copy (internal mutex) from the TX output FIFO (FilterQ).
     // Returns false if stopAll becomes true while waiting.

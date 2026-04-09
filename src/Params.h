@@ -41,6 +41,10 @@ public:
     /// If true, applies channel gain directly to the signal before adding noise (varies SNR).
     bool ApplyGainBeforeNoise = false;
     SimModes SimMode;
+    OpModes OpMode;
+    double RxFreq, TxFreq, TxGaindb;
+    double RxSampleRate, TxSampleRate;
+    string ref;
     unsigned int NumErrors;
     unsigned int Seed;
     bool Debug;

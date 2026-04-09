@@ -14,6 +14,7 @@
  */
 
 #include "Transmitter.h"
+#include <iostream>
 #include <cstring>
 extern mutex mtxfilethr;
 Transmitter::Transmitter(/* args */):DataQ(LengthQueue),FilterQ(LengthQueue)
@@ -51,7 +52,10 @@ Transmitter::Transmitter(/* args */):DataQ(LengthQueue),FilterQ(LengthQueue)
 bool Transmitter::pushTxSymFrameBlocking_(const float* i, const float* q)
 {
     std::unique_lock<std::mutex> lk(mtxTxSymQ_);
-    cvTxSymSpace_.wait(lk, [&] { return StopAll || txSymCount_ < kTxSymQueueDepth; });
+    while (!StopAll && txSymCount_ >= kTxSymQueueDepth)
+    {
+        cvTxSymSpace_.wait_for(lk, std::chrono::milliseconds(1));
+    }
     if (StopAll)
         return false;
     TxSymSlot& slot = txSymPool_[static_cast<size_t>(txSymTail_)];
@@ -85,7 +89,10 @@ bool Transmitter::WaitPopTxSymbolFrame(float* dstI, float* dstQ, int nSym)
     if (nSym != kTxSymFrame)
         return false;
     std::unique_lock<std::mutex> lk(mtxTxSymQ_);
-    cvTxSymReady_.wait(lk, [&] { return StopAll || txSymCount_ > 0; });
+    while (!StopAll && txSymCount_ <= 0)
+    {
+        cvTxSymReady_.wait_for(lk, std::chrono::milliseconds(1));
+    }
     if (StopAll)
         return false;
     const TxSymSlot& slot = txSymPool_[static_cast<size_t>(txSymHead_)];
@@ -172,17 +179,27 @@ void Transmitter::StartThreads(TxModes TxMode, float RollOff, string FileName )
 
 void Transmitter::StopThreads(void)
 {
+    std::cout << "[Transmitter] StopThreads called." << std::endl;
     StopAll = true;
-    CvFilterData.notify_one();
-    CvDataFilter.notify_one();
-    CvOutFilter.notify_one();
-    CvFilterOut.notify_one();
+    std::cout << "[Transmitter] Notifying CVs..." << std::endl;
+    CvFilterData.notify_all();
+    CvDataFilter.notify_all();
+    CvOutFilter.notify_all();
+    CvFilterOut.notify_all();
+#ifdef ENABLE_RAW_PREVITERBI_METRICS
+    cvTxSymSpace_.notify_all();
+    cvTxSymReady_.notify_all();
+#endif
     
+    std::cout << "[Transmitter] Joining DataGenThread..." << std::endl;
     if(DataGenThread.joinable())
         DataGenThread.join();
+    std::cout << "[Transmitter] Joining FilterThread..." << std::endl;
     if(FilterThread.joinable())
         FilterThread.join();
+    std::cout << "[Transmitter] Threads joined, freeing Data..." << std::endl;
     _mm_free(Data);
+    std::cout << "[Transmitter] StopThreads finished." << std::endl;
 }
 
 /**
@@ -202,9 +219,7 @@ void Transmitter::GenerateData(void)
     unsigned int PtrData = 0;
     while(!StopAll)
     {
-
         //Scramble Data
-
         unsigned int PtrEnd = PtrData + BatchSize3;
         if(PtrEnd < LengthData)
         {
@@ -228,7 +243,10 @@ void Transmitter::GenerateData(void)
             break;
 
         std::unique_lock<std::mutex> lk(mtxDataQ_);
-        CvFilterData.wait(lk, [&] { return StopAll || DataQ.AvailableWrite(); });
+        while (!StopAll && !DataQ.AvailableWrite())
+        {
+            CvFilterData.wait_for(lk, std::chrono::milliseconds(1));
+        }
         if(StopAll)
             break;
         unsigned int PtrWr = DataQ.GetPtrWr();
@@ -238,8 +256,7 @@ void Transmitter::GenerateData(void)
         }
         DataQ.AdvanceWrite();
         lk.unlock();
-        CvDataFilter.notify_one();
-
+        CvDataFilter.notify_all();
     }
         
 
@@ -261,12 +278,13 @@ void Transmitter::FilterData(void)
     while(!StopAll)
     {
         std::unique_lock<std::mutex> lkData(mtxDataQ_);
-        CvDataFilter.wait(lkData, [&] { return StopAll || DataQ.AvailableRead(); });
+        while (!StopAll && !DataQ.AvailableRead())
+        {
+            CvDataFilter.wait_for(lkData, std::chrono::milliseconds(1));
+        }
         if(StopAll)
             break;
         
-       
-
         //Interleave the data and map to +/- 1    
         unsigned int PtrRd = DataQ.GetPtrRd();
         unsigned int PtrOut = 0;
@@ -287,33 +305,23 @@ void Transmitter::FilterData(void)
         
         DataQ.AdvanceRead();
         lkData.unlock();
-        CvFilterData.notify_one();
+        CvFilterData.notify_all();
 
         oTxFilter.CreateOutputs(FilterInI,FilterInQ,FilterOutI,FilterOutQ,BatchSize3);
         
         std::unique_lock<std::mutex> lkFilt(mtxFilterQ_);
-        CvOutFilter.wait(lkFilt, [&] { return StopAll || FilterQ.AvailableWrite(); });
+        while (!StopAll && !FilterQ.AvailableWrite())
+        {
+            CvOutFilter.wait_for(lkFilt, std::chrono::milliseconds(1));
+        }
         if(StopAll)
             break;
 
         unsigned int PtrWr = FilterQ.GetPtrWr();
         interleave_iq_f32_to_f32_avx2(FilterOutI,FilterOutQ,TxOut[PtrWr],BatchSize3*2);
-        #ifdef DEBUG_TX
-        std::copy(TxOut[PtrWr],TxOut[PtrWr]+BatchSize3*4,OutAllI+PtrOutAll);
-        PtrOutAll += BatchSize3*4;
-        if(PtrOutAll >= 5000000)
-        {    
-            FILE *fid = fopen("TxOut.bin","wb");
-            int size1 = sizeof(float);
-            fwrite(OutAllI,sizeof(float),PtrOutAll,fid);
-            fclose(fid);
-            exit(-1);
-        }
-        #endif
         FilterQ.AdvanceWrite();
         lkFilt.unlock();
-        CvFilterOut.notify_one();
-    
+        CvFilterOut.notify_all();
     }
 
     oTxFilter.DeleteObjects();
@@ -322,8 +330,11 @@ void Transmitter::FilterData(void)
 bool Transmitter::CopyOutputSamples(float* dst, int nFloats, std::atomic<bool>& stopAll)
 {
     std::unique_lock<std::mutex> lk(mtxFilterQ_);
-    CvFilterOut.wait(lk, [&] { return stopAll || FilterQ.AvailableRead(); });
-    if (stopAll)
+    while (!stopAll && !StopAll && !FilterQ.AvailableRead())
+    {
+        CvFilterOut.wait_for(lk, std::chrono::milliseconds(1));
+    }
+    if (stopAll || StopAll)
         return false;
     if (!FilterQ.AvailableRead())
         return false;

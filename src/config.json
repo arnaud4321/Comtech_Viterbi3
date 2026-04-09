@@ -23,7 +23,16 @@
     "NumErrors": 0,
     "Seed": 132345,
     "Debug":0,
-    "DisplayPeriodSec": 5.0
+    "DisplayPeriodSec": 1.0
+  },
+  "Operation": {
+    "Mode": 0,
+    "RxFreq": 600000000,
+    "TxFreq": 600000000,
+    "TxGaindb": 20.0,
+    "RxSampleRate": 4000000.0,
+    "TxSampleRate": 4000000.0,
+    "ref": "internal"
   },
   "CentralFrequency": {
     "Enable": 1,

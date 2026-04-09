@@ -1412,10 +1412,10 @@ skip_raw:;
                             uint64_t diffErrors = NumErrorsAll - prevErrors;
                             uint64_t diffBits = NumBitsAll - prevBits;
                             if (diffBits > 0 && (static_cast<double>(diffErrors) / static_cast<double>(diffBits)) > 0.3) {
+                                if (displayPeriodSec_ > 0.0 && PRBSSynchronized) {
+                                    std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER detected (" << diffErrors << "/" << diffBits << ")" << std::endl;
+                                }
                                 PRBSSynchronized = false;
-                            if (displayPeriodSec_ > 0.0 && !PRBSSynchronized) {
-                                std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER detected (" << diffErrors << "/" << diffBits << ")" << std::endl;
-                            }
                             }
                         }
                         OutputQ.AdvanceRead();

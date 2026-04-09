@@ -48,8 +48,8 @@ void Sampler::StartThread(void)
 }
 void Sampler::StopThread(void)
 {
-    CvSamplerUser.notify_all();
     StopAll = true;
+    CvSamplerUser.notify_all();
     if(SamplingThread.joinable())
         SamplingThread.join();
 }
@@ -130,8 +130,8 @@ void Sampler::OperateSampler(void)
             std::chrono::duration<double>(nowTp - SamplerConsoleWindowStart).count();
         if (displayPeriodSec_ > 0.0 && dtConsole >= displayPeriodSec_)
         {
-            std::cout << "[Sampler] throughput=" << lastThroughputMsps_.load(std::memory_order_relaxed)
-                      << " Msps" << std::endl;
+            // std::cout << "[Sampler] throughput=" << lastThroughputMsps_.load(std::memory_order_relaxed)
+            //           << " Msps" << std::endl;
             SamplerConsoleWindowStart = std::chrono::steady_clock::now();
         }
 

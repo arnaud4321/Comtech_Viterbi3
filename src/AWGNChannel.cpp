@@ -124,32 +124,34 @@ void AWGNChannel::StartThreads(void)
     const double eps = totalPpm0 * 1.0e-6;
     const double actualSymbolRate = SymbolRate * (1.0 + eps);
 
-    std::cout << std::fixed << std::setprecision(6) << "[AWGN] Channel parameters\n"
-              << "        Es/N0 (dB):                    " << pParams->EsN0 << '\n'
-              << "        InitialGainDb (dB):          " << pParams->InitialGainDb << '\n'
-              << "        DynamicRangeDb (dB):         " << pParams->DynamicRangeDb << '\n'
-              << "        RangeDb range (dB):          [" << rangeDbMin << " .. " << rangeDbMax << "]\n"
-              << "        InitialFrequencyShift (Hz):  " << pParams->InitialFrequencyShift << '\n'
-              << "        FrequencyShift (Hz):         " << pParams->FrequencyShift << '\n'
-              << "        FrequencyShift range (Hz):   [" << freqShiftStartHz << " .. " << freqShiftPeakHz << "]\n"
-              << "        ClockMismatchPpm:            " << pParams->ClockMismatchPpm << '\n'
-              << "        CarrierToSymbolRateRatio:    " << pParams->CarrierToSymbolRateRatio
-              << " (fc/Rs)\n"
-              << "        Symbol rate Rs (sym/s):      " << SymbolRate << '\n'
-              << "        Actual Rs from ppm (sym/s):  " << actualSymbolRate << '\n'
-              << "        Stable1 (s):                 " << StablePeriod << '\n'
-              << "        Acceleration1 (s):           " << AccelerationPeriod << '\n'
-              << "        Stable2 (s):                 " << StablePeriod << '\n'
-              << "        Acceleration2 (s):           " << AccelerationPeriod << '\n'
-              << "        TotalPeriod (s):             " << TotalPeriod << '\n'
-              << "        DisplayPeriodSec (s):        " << displayPeriodSec_
-              << (displayPeriodSec_ > 0.0 ? "" : " (periodic status off)") << '\n'
-              << "        SamplingClockOffset total ppm (t=0): " << totalPpm0 << '\n'
-              << "        SamplingClockOffset total ppm range: [" << totalPpmMin << " .. " << totalPpmMax << "]\n"
-              << "          clock mismatch component:  " << pParams->ClockMismatchPpm << '\n'
-              << "          Doppler component (t=0):   " << ppmDoppler0 << '\n'
-              << "          Doppler component range:   [" << ppmDopplerMin << " .. " << ppmDopplerMax << "]\n"
-              << "          (Doppler from FrequencyShift / (fc/Rs) / Rs)\n";
+    if (displayPeriodSec_ > 0.0) {
+        std::cout << std::fixed << std::setprecision(6) << "[AWGN] Channel parameters\n"
+                  << "        Es/N0 (dB):                    " << pParams->EsN0 << '\n'
+                  << "        InitialGainDb (dB):          " << pParams->InitialGainDb << '\n'
+                  << "        DynamicRangeDb (dB):         " << pParams->DynamicRangeDb << '\n'
+                  << "        RangeDb range (dB):          [" << rangeDbMin << " .. " << rangeDbMax << "]\n"
+                  << "        InitialFrequencyShift (Hz):  " << pParams->InitialFrequencyShift << '\n'
+                  << "        FrequencyShift (Hz):         " << pParams->FrequencyShift << '\n'
+                  << "        FrequencyShift range (Hz):   [" << freqShiftStartHz << " .. " << freqShiftPeakHz << "]\n"
+                  << "        ClockMismatchPpm:            " << pParams->ClockMismatchPpm << '\n'
+                  << "        CarrierToSymbolRateRatio:    " << pParams->CarrierToSymbolRateRatio
+                  << " (fc/Rs)\n"
+                  << "        Symbol rate Rs (sym/s):      " << SymbolRate << '\n'
+                  << "        Actual Rs from ppm (sym/s):  " << actualSymbolRate << '\n'
+                  << "        Stable1 (s):                 " << StablePeriod << '\n'
+                  << "        Acceleration1 (s):           " << AccelerationPeriod << '\n'
+                  << "        Stable2 (s):                 " << StablePeriod << '\n'
+                  << "        Acceleration2 (s):           " << AccelerationPeriod << '\n'
+                  << "        TotalPeriod (s):             " << TotalPeriod << '\n'
+                  << "        DisplayPeriodSec (s):        " << displayPeriodSec_
+                  << (displayPeriodSec_ > 0.0 ? "" : " (periodic status off)") << '\n'
+                  << "        SamplingClockOffset total ppm (t=0): " << totalPpm0 << '\n'
+                  << "        SamplingClockOffset total ppm range: [" << totalPpmMin << " .. " << totalPpmMax << "]\n"
+                  << "          clock mismatch component:  " << pParams->ClockMismatchPpm << '\n'
+                  << "          Doppler component (t=0):   " << ppmDoppler0 << '\n'
+                  << "          Doppler component range:   [" << ppmDopplerMin << " .. " << ppmDopplerMax << "]\n"
+                  << "          (Doppler from FrequencyShift / (fc/Rs) / Rs)\n";
+    }
 
     samplingClockOffset_.Configure(totalPpm0);
     samplingClockOffset_.Start(&OutputBuffer, &mtxOutputBuffer_, &CvUserOut, &CvOutUser, &StopAll);
@@ -168,12 +170,12 @@ void AWGNChannel::StartThreads(void)
 void AWGNChannel::StopThreads(void)
 {
     StopAll = true;
-    CvOutNoise.notify_one();
-    CvOutUser.notify_one();
-    CvNoiseOut.notify_one();
-    CvUserOut.notify_one();
-    cvFreqQData_.notify_one();
-    cvFreqQSpace_.notify_one();
+    CvOutNoise.notify_all();
+    CvOutUser.notify_all();
+    CvNoiseOut.notify_all();
+    CvUserOut.notify_all();
+    cvFreqQData_.notify_all();
+    cvFreqQSpace_.notify_all();
     if(NoiseThread.joinable())
         NoiseThread.join();
     if(OutputThread.joinable())
@@ -383,43 +385,43 @@ void AWGNChannel::GenerateOutput(void)
         // Periodic channel status line.
         {
             const auto now = std::chrono::steady_clock::now();
-            if (displayPeriodSec_ > 0.0 &&
-                now - lastStatusDisplay >= std::chrono::duration<double>(displayPeriodSec_))
-            {
-                const char* segName = "stable1";
-                // Best-effort read of last enqueued segment (no extra locking: we reuse the already pushed logic).
-                // For clarity, we just derive it again from batchCount/t_rate.
-                const double t_rate = static_cast<double>(batchCount) * TxOutputBatchDuration;
-                const double a = AccelerationPeriod;
-                const double s = StablePeriod;
-                double deltaHz = 0.0;
-                if (t_rate < s) { segName = "stable1"; deltaHz = 0.0; }
-                else if (t_rate < s + a) { segName = "acc1"; deltaHz = (t_rate - s) / std::max(1e-12, a) * pParams->FrequencyShift; }
-                else if (t_rate < s + a + s) { segName = "stable2"; deltaHz = pParams->FrequencyShift; }
-                else { segName = "acc2"; deltaHz = (1.0 - (t_rate - (s + a + s)) / std::max(1e-12, a)) * pParams->FrequencyShift; }
-                deltaHz = std::max(0.0, std::min(pParams->FrequencyShift, deltaHz));
-                const double freqHz = pParams->InitialFrequencyShift + deltaHz;
-                const double ppmDoppler =
-                    freqHz * 1.0e6 / (pParams->CarrierToSymbolRateRatio * SymbolRate);
-                const double totalPpm = pParams->ClockMismatchPpm + ppmDoppler;
-                double gainDb = pParams->InitialGainDb;
-                if (t_rate < s) { gainDb = pParams->InitialGainDb; }
-                else if (t_rate < s + a) { gainDb = pParams->InitialGainDb + (t_rate - s) / std::max(1e-12, a) * pParams->DynamicRangeDb; }
-                else if (t_rate < s + a + s) { gainDb = pParams->InitialGainDb + pParams->DynamicRangeDb; }
-                else { gainDb = pParams->InitialGainDb + (1.0 - (t_rate - (s + a + s)) / std::max(1e-12, a)) * pParams->DynamicRangeDb; }
-                const double t_sim = std::chrono::duration<double>(now - wall_start).count();
-                double snrDb = pParams->ApplyGainBeforeNoise ? (pParams->EsN0 + gainDb) : pParams->EsN0;
-                std::cout << std::fixed << std::setprecision(6)
-                          << "[AWGN] status seg=" << segName
-                          << " freqShiftHz=" << freqHz
-                          << " gainDb=" << gainDb
-                          << " snrDb=" << snrDb
-                          << " ppm=" << totalPpm
-                          << " t_sim=" << t_sim << " s"
-                          << " t_rate=" << t_rate << " s"
-                          << std::endl;
-                lastStatusDisplay = now;
-            }
+        if (displayPeriodSec_ > 0.0 &&
+            now - lastStatusDisplay >= std::chrono::duration<double>(displayPeriodSec_))
+        {
+            // const char* segName = "stable1";
+            // // Best-effort read of last enqueued segment (no extra locking: we reuse the already pushed logic).
+            // // For clarity, we just derive it again from batchCount/t_rate.
+            // const double t_rate = static_cast<double>(batchCount) * TxOutputBatchDuration;
+            // const double a = AccelerationPeriod;
+            // const double s = StablePeriod;
+            // double deltaHz = 0.0;
+            // if (t_rate < s) { segName = "stable1"; deltaHz = 0.0; }
+            // else if (t_rate < s + a) { segName = "acc1"; deltaHz = (t_rate - s) / std::max(1e-12, a) * pParams->FrequencyShift; }
+            // else if (t_rate < s + a + s) { segName = "stable2"; deltaHz = pParams->FrequencyShift; }
+            // else { segName = "acc2"; deltaHz = (1.0 - (t_rate - (s + a + s)) / std::max(1e-12, a)) * pParams->FrequencyShift; }
+            // deltaHz = std::max(0.0, std::min(pParams->FrequencyShift, deltaHz));
+            // const double freqHz = pParams->InitialFrequencyShift + deltaHz;
+            // const double ppmDoppler =
+            //     freqHz * 1.0e6 / (pParams->CarrierToSymbolRateRatio * SymbolRate);
+            // const double totalPpm = pParams->ClockMismatchPpm + ppmDoppler;
+            // double gainDb = pParams->InitialGainDb;
+            // if (t_rate < s) { gainDb = pParams->InitialGainDb; }
+            // else if (t_rate < s + a) { gainDb = pParams->InitialGainDb + (t_rate - s) / std::max(1e-12, a) * pParams->DynamicRangeDb; }
+            // else if (t_rate < s + a + s) { gainDb = pParams->InitialGainDb + pParams->DynamicRangeDb; }
+            // else { gainDb = pParams->InitialGainDb + (1.0 - (t_rate - (s + a + s)) / std::max(1e-12, a)) * pParams->DynamicRangeDb; }
+            // const double t_sim = std::chrono::duration<double>(now - wall_start).count();
+            // double snrDb = pParams->ApplyGainBeforeNoise ? (pParams->EsN0 + gainDb) : pParams->EsN0;
+            // std::cout << std::fixed << std::setprecision(6)
+            //           << "[AWGN] status seg=" << segName
+            //           << " freqShiftHz=" << freqHz
+            //           << " gainDb=" << gainDb
+            //           << " snrDb=" << snrDb
+            //           << " ppm=" << totalPpm
+            //           << " t_sim=" << t_sim << " s"
+            //           << " t_rate=" << t_rate << " s"
+            //           << std::endl;
+            lastStatusDisplay = now;
+        }
         }
     }
 }

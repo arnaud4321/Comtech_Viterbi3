@@ -5,9 +5,9 @@
 #pragma once
 
 /** @brief Nominal symbol rate (sym/s). */
-const double SymbolRate = 10.71e6;
+inline double SymbolRate = 10.71e6;
 /** @brief Complex baseband sampling rate at 2 samples per symbol (Hz). */
-const double SamplingRate = 2.0*SymbolRate;
+inline double SamplingRate = 2.0*SymbolRate;
 const int BatchSize1 = 1024;
 const int BatchSize3 = 3 * BatchSize1;
 const int BatchSize1Bytes = BatchSize1 >> 3;
@@ -15,11 +15,11 @@ const int BatchConvSize1 = BatchSize1 * 2;
 const int TxOutputBatchSize = BatchSize3 * 4;
 // TxOutputBatchSize is the number of float values in interleaved IQ (I,Q,I,Q,...),
 // so the number of complex samples per batch is TxOutputBatchSize/2.
-const double TxOutputBatchDuration = (static_cast<double>(TxOutputBatchSize) / 2.0) / SamplingRate;
+inline double TxOutputBatchDuration = (static_cast<double>(TxOutputBatchSize) / 2.0) / SamplingRate;
 const int ReceiverInputBatchIQSamples = BatchSize3 * 2; //BatchSize3 x2 (conv) /2 (IQ) x2 (2x)
 const int ReceiverInputBatchIQSymbols = BatchSize3;
 const int SPB = 8192;
-const double SamplingFrequency = 21.42e6;
+inline double SamplingFrequency = 21.42e6;
 
 /** @brief Float ring length (per I/Q) for RX @c BufferFloat stages (filter, resampler, freq corrector). Larger ⇒ more headroom under backpressure. */
 inline constexpr int kRxRingFloatLen = SPB * 1024;
@@ -43,7 +43,11 @@ enum TxModes
 /** @brief High-level simulation mode (acquisition vs continuous). */
 enum SimModes
 {
-    ACQ_SIM,CONT_SIM
+    NOT_SIM,ACQ_SIM,CONT_SIM
+};
+enum OpModes
+{
+    NOT_OP,TX_ONLY,RX_ONLY,TX_RX
 };
 const float ViterbiThreshold1 = 80; //difference between best metric and other 3 options
 const int PRBSThreshold = 12;
@@ -62,3 +66,5 @@ const int PRBSInjectStride = -1;   ///< 0 disables; otherwise flips ~1/stride bi
 const int PRBSInjectStart = 0;    ///< Start index (in bits / bytes) for injection.
 
 #define WRITE_LOG_THR
+#define RX_INITIAL_GAIN 30
+#define AGCBACKOFF 18

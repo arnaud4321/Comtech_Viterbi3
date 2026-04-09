@@ -26,6 +26,7 @@ try:
     matplotlib.use("TkAgg")
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
+    import numpy as np
 except Exception:
     write_troubleshoot(
         "Constellation display failed to start (matplotlib/TkAgg import).\n"
@@ -84,19 +85,20 @@ try:
 except Exception:
     pass
 
-fig.subplots_adjust(left=0.06, right=0.99, top=0.94, bottom=0.09, wspace=0.06, hspace=0.32)
+fig.subplots_adjust(left=0.06, right=0.99, top=0.94, bottom=0.09, wspace=0.15, hspace=0.32)
 
 # Layout:
-# - Top: constellation (left) + state/status (right)
+# - Top: constellation (left) + spectrum (middle) + state/status (right)
 # - Bottom: history plots (2 rows)
 gs = fig.add_gridspec(
     nrows=3,
-    ncols=2,
+    ncols=3,
     height_ratios=[3.75, 1.12, 1.12],
-    width_ratios=[3.5, 2.9],
+    width_ratios=[2.0, 2.5, 3.0],
 )
 ax = fig.add_subplot(gs[0, 0])
-ax_info = fig.add_subplot(gs[0, 1])
+ax_spec = fig.add_subplot(gs[0, 1])
+ax_info = fig.add_subplot(gs[0, 2])
 
 hist_spec1 = gs[1, :].subgridspec(1, 3, wspace=0.20)
 ax_ppm = fig.add_subplot(hist_spec1[0, 0])
@@ -114,6 +116,14 @@ ax.set_xlabel("I")
 ax.set_ylabel("Q")
 ax.grid(True, alpha=0.3)
 ax.set_aspect("equal", adjustable="box")
+
+ax_spec.set_title("RX Spectrum (Baseband)")
+ax_spec.set_xlabel("Normalized Frequency")
+ax_spec.set_ylabel("Magnitude (dB)")
+ax_spec.grid(True, alpha=0.3)
+ax_spec.set_xlim(-0.5, 0.5)
+ax_spec.set_ylim(-60, 20)
+line_spec, = ax_spec.plot([], [], "-", lw=1.0, color='blue')
 
 ax_info.set_axis_off()
 info_text_left = ax_info.text(
@@ -353,6 +363,20 @@ while True:
         if latest_pts is not None:
             px, py = latest_pts
             sc.set_offsets(list(zip(px, py)))
+
+            # Compute and update spectrum
+            if len(px) > 0:
+                c_pts = np.array(px) + 1j * np.array(py)
+                win = np.hanning(len(c_pts))
+                spec = np.fft.fftshift(np.fft.fft(c_pts * win))
+                mag = 20 * np.log10(np.abs(spec) + 1e-12)
+                if len(mag) > 0:
+                    mag -= np.max(mag)  # Normalize peak to 0 dB
+                freqs = np.linspace(-0.5, 0.5, len(c_pts))
+                line_spec.set_data(freqs, mag)
+                
+                # Autoscale Y if needed, but usually -60 to 5 is fine.
+                ax_spec.set_ylim(-60, 5)
 
         # Right panel text (English)
         if latest_kv is not None:

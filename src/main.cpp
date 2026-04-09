@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <atomic>
+#include <csignal>
 using namespace std;
 #include "ConsoleAlert.h"
 #include "Params.h"
@@ -24,11 +25,22 @@ using namespace std;
 #include "AWGNChannel.h"
 #include "Receiver.h"
 #include "Sampler.h"
+#include "UHDSampler.h"
+#include "TransmitterManager.h"
+#include "USRPInit.h"
 using namespace std;
 
 std::atomic<bool> Finish{false};
 
 mutex mtxfilethr;
+
+void signal_handler(int signal)
+{
+    if (signal == SIGINT || signal == SIGTERM) {
+        // Do not use std::cout here, as it is not async-signal-safe and can cause deadlocks!
+        Finish.store(true, std::memory_order_relaxed);
+    }
+}
 
 /**
  * @brief Loads config, starts TX/channel/sampler/RX threads, runs until @c Finish or FILE_TX drain.
@@ -50,46 +62,78 @@ int main(int argc, char* argv[])
 	#endif
 	cout<<"Starting program"<<endl;
 	
+	std::signal(SIGINT, signal_handler);
+	std::signal(SIGTERM, signal_handler);
 
  	Params objParams;
     objParams.ReadParams(argv[1]);
-	Transmitter oTx;
-	oTx.StartThreads(PRBS_TX,objParams.RollOff);
-	double TxPower = oTx.GetTxPower();
-	AWGNChannel oAWGN(objParams.Seed);
-	oAWGN.SetTransmitter(&oTx);
-	oAWGN.SetParameters(&objParams);
-	oAWGN.StartThreads();
-	Sampler objSampler(objParams.Debug);
-	{
-		// Match RX filter: 1 s rollup when DisplayPeriodSec<=0 (avoid coupling to small Constellation PeriodSec).
-		const double tpm =
-		    (objParams.DisplayPeriodSec > 0.0) ? objParams.DisplayPeriodSec : 1.0;
-		objSampler.SetThroughputMeasurePeriodSec(tpm);
+
+	Transmitter* oTx = nullptr;
+	if (objParams.OpMode != RX_ONLY) {
+		oTx = new Transmitter();
+		oTx->StartThreads(PRBS_TX,objParams.RollOff);
 	}
-	objSampler.SetDisplayPeriodSec(objParams.DisplayPeriodSec);
-	objSampler.SetChannel(&oAWGN);
-	objSampler.StartThread();
-	Receiver oRx;
-	oRx.SetSampler(&objSampler);
-	oRx.SetChannel(&oAWGN);
-	oRx.SetTransmitter(&oTx);
-	oRx.StartThreads(objParams.RollOff, objParams.TxMode, objParams.SymRateCfg, objParams.DisplayPeriodSec, objParams.CentralFreqCfg, objParams.ConstellationCfg);
+	
+	AWGNChannel* oAWGN = nullptr;
+	if (objParams.OpMode == NOT_OP) {
+		oAWGN = new AWGNChannel(objParams.Seed);
+		oAWGN->SetTransmitter(oTx);
+		oAWGN->SetParameters(&objParams);
+		oAWGN->StartThreads();
+	}
+
+	USRPInit* pUSRPInit = nullptr;
+	TransmitterManager* pTxManager = nullptr;
+	Sampler* objSampler = nullptr;
+
+	if (objParams.OpMode != NOT_OP) {
+		pUSRPInit = new USRPInit(objParams.RxFreq, objParams.TxFreq, 0, objParams.TxGaindb, 0, objParams.ref, objParams.RxSampleRate, objParams.TxSampleRate);
+	}
+
+	if (objParams.OpMode == NOT_OP) {
+		objSampler = new Sampler(objParams.Debug);
+		objSampler->SetChannel(oAWGN);
+	} else if (objParams.OpMode != TX_ONLY) {
+		objSampler = new UHDSampler(pUSRPInit->usrp);
+	}
+
+	if (objParams.OpMode == TX_RX || objParams.OpMode == TX_ONLY) {
+		pTxManager = new TransmitterManager(pUSRPInit->usrp);
+		pTxManager->SetTransmitter(oTx);
+		std::this_thread::sleep_for(100ms);
+		pTxManager->StartThreads();
+	}
+
+	if (objSampler) {
+		const double tpm = (objParams.DisplayPeriodSec > 0.0) ? objParams.DisplayPeriodSec : 1.0;
+		objSampler->SetThroughputMeasurePeriodSec(tpm);
+		objSampler->SetDisplayPeriodSec(objParams.DisplayPeriodSec);
+		objSampler->StartThread();
+	}
+
+	Receiver* oRx = nullptr;
+	if (objParams.OpMode != TX_ONLY) {
+		oRx = new Receiver();
+		oRx->SetSampler(objSampler);
+		oRx->SetChannel(oAWGN);
+		oRx->SetTransmitter(oTx);
+		oRx->StartThreads(objParams.RollOff, objParams.TxMode, objParams.SymRateCfg, objParams.DisplayPeriodSec, objParams.CentralFreqCfg, objParams.ConstellationCfg);
+	}
 	
 	auto Start = std::chrono::high_resolution_clock::now();
 
 	condition_variable *pcv_rx_out, *pcv_out_rx;
-	if(objParams.TxMode == FILE_TX)
+	if(oRx != nullptr && objParams.TxMode == FILE_TX)
 	{
 		unsigned char *Out = nullptr;
 		
-		while((Out = oRx.GetOutput()) == nullptr)
+		while((Out = oRx->GetOutput()) == nullptr)
 		{
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
-		oRx.AdvanceOutput();
+		oRx->AdvanceOutput();
 	}
-	else
+	else if (oRx != nullptr)
 	{
 		while(!Finish.load(std::memory_order_relaxed))
 		{
@@ -101,38 +145,42 @@ int main(int argc, char* argv[])
 				continue;
 			auto Now = std::chrono::high_resolution_clock::now();
 			std::chrono::duration<double> elapsed = Now - Start;
-			const double t_rate = static_cast<double>(oRx.NumBitsAll) / SymbolRate;
-			auto awgnState = oAWGN.GetCurrentApplied();
-			double snrDb = awgnState.SnrDb;
-			double evmRms = oRx.GetPhaseTrackingEvmRms();
+			const double t_rate = static_cast<double>(oRx->NumBitsAll) / SymbolRate;
+			
+            double snrDb = std::numeric_limits<double>::quiet_NaN();
+            if (oAWGN) {
+                auto awgnState = oAWGN->GetCurrentApplied();
+                snrDb = awgnState.SnrDb;
+            }
+			double evmRms = oRx->GetPhaseTrackingEvmRms();
 			double snrEvmDb = (evmRms > 1e-12) ? (-20.0 * std::log10(evmRms)) : std::numeric_limits<double>::quiet_NaN();
 #ifdef ENABLE_RAW_PREVITERBI_METRICS
-			const bool rawLocked = oRx.RawSyncLocked.load(std::memory_order_relaxed);
+			const bool rawLocked = oRx->RawSyncLocked.load(std::memory_order_relaxed);
 			cout << std::fixed << std::setprecision(6)
 			     << "[Main][RAW] t_sim=" << elapsed.count() << " s"
 			     << " t_rate=" << t_rate << " s"
 			     << " snrDb=" << snrDb
 			     << " snrEvmDb=" << snrEvmDb
-			     << " RAW_LOCK=" << (rawLocked ? (std::string(ConsoleAlert::kGreenOpen) + "1" + ConsoleAlert::kReset) : "0")
-			     << " syms=" << oRx.RawNumSymsAll
-			     << " symErr=" << oRx.RawNumSymErrorsAll
+			     << " RAW_LOCK=" << (rawLocked ? "\033[32mLOCKED\033[0m" : "\033[31mUNLOCKED\033[0m")
+			     << " syms=" << oRx->RawNumSymsAll
+			     << " symErr=" << oRx->RawNumSymErrorsAll
 			     << " SER=" << std::scientific << std::setprecision(6)
-			     << (static_cast<double>(oRx.RawNumSymErrorsAll) / std::max(1.0, static_cast<double>(oRx.RawNumSymsAll)))
+			     << (static_cast<double>(oRx->RawNumSymErrorsAll) / std::max(1.0, static_cast<double>(oRx->RawNumSymsAll)))
 			     << std::defaultfloat
-			     << " syncPeakAbs=" << std::scientific << std::setprecision(6) << oRx.RawSyncPeakAbs.load(std::memory_order_relaxed)
+			     << " syncPeakAbs=" << std::scientific << std::setprecision(6) << oRx->RawSyncPeakAbs.load(std::memory_order_relaxed)
 			     << std::defaultfloat
-			     << " syncPeakToMean=" << std::scientific << std::setprecision(6) << oRx.RawSyncBestAbs.load(std::memory_order_relaxed)
+			     << " syncPeakToMean=" << std::scientific << std::setprecision(6) << oRx->RawSyncBestAbs.load(std::memory_order_relaxed)
 			     << std::defaultfloat
-			     << " syncThrPeakToMean=" << std::scientific << std::setprecision(6) << oRx.RawSyncThrAbs.load(std::memory_order_relaxed)
+			     << " syncThrPeakToMean=" << std::scientific << std::setprecision(6) << oRx->RawSyncThrAbs.load(std::memory_order_relaxed)
 			     << std::defaultfloat
-			     << " syncPhaseRad=" << std::fixed << std::setprecision(6) << oRx.RawSyncPeakPhaseRad.load(std::memory_order_relaxed)
-			     << " syncAppliedPhaseRad=" << std::fixed << std::setprecision(6) << oRx.RawSyncAppliedPhaseRad.load(std::memory_order_relaxed)
-			     << " syncAppliedQuad=" << oRx.RawSyncAppliedQuad.load(std::memory_order_relaxed)
-			     << " syncLagSym=" << oRx.RawSyncLagSym.load(std::memory_order_relaxed)
-			     << " bits=" << oRx.RawNumBitsAll
-			     << " bitErr=" << oRx.RawNumErrorsAll
+			     << " syncPhaseRad=" << std::fixed << std::setprecision(6) << oRx->RawSyncPeakPhaseRad.load(std::memory_order_relaxed)
+			     << " syncAppliedPhaseRad=" << std::fixed << std::setprecision(6) << oRx->RawSyncAppliedPhaseRad.load(std::memory_order_relaxed)
+			     << " syncAppliedQuad=" << oRx->RawSyncAppliedQuad.load(std::memory_order_relaxed)
+			     << " syncLagSym=" << oRx->RawSyncLagSym.load(std::memory_order_relaxed)
+			     << " bits=" << oRx->RawNumBitsAll
+			     << " bitErr=" << oRx->RawNumErrorsAll
 			     << " rawBER=" << std::scientific << std::setprecision(6)
-			     << (static_cast<double>(oRx.RawNumErrorsAll) / std::max(1.0, static_cast<double>(oRx.RawNumBitsAll)))
+			     << (static_cast<double>(oRx->RawNumErrorsAll) / std::max(1.0, static_cast<double>(oRx->RawNumBitsAll)))
 			     << std::defaultfloat
 			     << endl;
 #endif
@@ -141,28 +189,48 @@ int main(int argc, char* argv[])
 			     << " t_rate=" << t_rate << " s"
 			     << " snrDb=" << snrDb
 			     << " snrEvmDb=" << snrEvmDb
-			     << " bits=" << oRx.NumBitsAll
-			     << " errors=" << oRx.NumErrorsAll
+			     << " bits=" << oRx->NumBitsAll
+			     << " errors=" << oRx->NumErrorsAll
 			     << " BER=" << std::scientific << std::setprecision(6)
-			     << (static_cast<double>(oRx.NumErrorsAll) / std::max(1.0, static_cast<double>(oRx.NumBitsAll)))
+			     << (static_cast<double>(oRx->NumErrorsAll) / std::max(1.0, static_cast<double>(oRx->NumBitsAll)))
 			     << std::defaultfloat
 			     << endl;
 			#ifdef DEBUG_STATISTICS
 			cout << std::fixed << std::setprecision(6)
-			     << "[Viterbi] mean_metrics_growth=" << oRx.CurrDebugStatistics.MeanMetricsGrowth
-			     << " max_metrics_growth=" << oRx.CurrDebugStatistics.MaxMetricsGrowth
+			     << "[Viterbi] mean_metrics_growth=" << oRx->CurrDebugStatistics.MeanMetricsGrowth
+			     << " max_metrics_growth=" << oRx->CurrDebugStatistics.MaxMetricsGrowth
 			     << " t_sim=" << elapsed.count() << " s"
 			     << " t_rate=" << t_rate << " s"
 			     << endl;
-
 			#endif
 		}
 	}
+    else {
+        while(!Finish.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::duration<double>(1.0));
+        }
+    }
 
-	oTx.StopThreads();
-	oAWGN.StopThreads();
-	oRx.StopThreads();
-	objSampler.StopThread();
+    std::cout << "[Main] Stopping Receiver..." << std::endl;
+    if (oRx) oRx->StopThreads();
+    std::cout << "[Main] Stopping TransmitterManager..." << std::endl;
+    if (pTxManager) pTxManager->StopThreads();
+    std::cout << "[Main] Stopping Sampler..." << std::endl;
+    if (objSampler) objSampler->StopThread();
+    std::cout << "[Main] Stopping AWGNChannel..." << std::endl;
+    if (oAWGN) oAWGN->StopThreads();
+    std::cout << "[Main] Stopping Transmitter..." << std::endl;
+    if (oTx) oTx->StopThreads();
+
+    // Give detached UHD threads a moment to finish cleanly before we yank the memory
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    std::cout << "[Main] Shutdown complete." << std::endl;
+    // We intentionally leak the top-level objects (oRx, pTxManager, etc.) 
+    // because detaching UHD threads means they might still be executing.
+    // The OS will reclaim all memory and USB handles immediately upon exit.
+    std::exit(0);
+
 	return 0;
 }
 

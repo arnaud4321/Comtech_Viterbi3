@@ -366,13 +366,16 @@ void ReceiverPhaseTrackingDD::ThreadMain()
             const double t_rate = static_cast<double>(symbols_total) / SymbolRate;
             const double t_sim =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-            std::cout << "[ReceiverPhaseTrackingDD] "
-                      << (nowLocked ? "\033[32mLOCKED\033[0m" : "\033[31mUNLOCKED\033[0m")
-                      << " t_sim=" << t_sim << " s"
-                      << " t_rate=" << t_rate << " s"
-                      << " errEma=" << errEma_ << " rad"
-                      << " thresh=" << lockThresholdRad_ << " rad"
-                      << std::endl;
+            if (displayPeriodSec_ > 0.0)
+            {
+                std::cout << "[ReceiverPhaseTrackingDD] "
+                          << (nowLocked ? "\033[32mLOCKED\033[0m" : "\033[31mUNLOCKED\033[0m")
+                          << " t_sim=" << t_sim << " s"
+                          << " t_rate=" << t_rate << " s"
+                          << " errEma=" << errEma_ << " rad"
+                          << " thresh=" << lockThresholdRad_ << " rad"
+                          << std::endl;
+            }
             prevLocked = nowLocked;
         }
 

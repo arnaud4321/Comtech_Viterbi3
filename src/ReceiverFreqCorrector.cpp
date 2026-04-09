@@ -149,8 +149,10 @@ void ReceiverFreqCorrector::ThreadMain()
             estimateCollecting = true;
             nextEstimateStart = std::chrono::steady_clock::now();
             hasTargetHz_ = false;
-            std::cout << "[CentralFreq] \033[31mDELOCK\033[0m"
-                      << " PhaseDD -> re-enable estimation" << std::endl;
+            if (displayPeriodSec_ > 0.0) {
+                std::cout << "[CentralFreq] \033[31mDELOCK\033[0m"
+                          << " PhaseDD -> re-enable estimation" << std::endl;
+            }
         }
         prevPhaseLocked_ = phaseLocked;
 
@@ -215,21 +217,23 @@ void ReceiverFreqCorrector::ThreadMain()
                     {
                         const double t_rate = static_cast<double>(samplesTotal_) / SamplingFrequency;
                         const double t_sim = std::chrono::duration<double>(now - wall_start).count();
-                        std::cout << "[CentralFreq] \033[32mDetected\033[0m offset=" << targetHz << " Hz"
-                                  << " [window " << cfg_.EstimationBlockSamples << " samples]"
-                                  << " t_sim=" << t_sim << " s"
-                                  << " t_rate=" << t_rate << " s"
-                                  << " peak/median=" << r.PeakToMedian
-                                  << " (threshold " << cfg_.Estimator.PeakToMedianThreshold << ")"
-                                  << " dF=" << r.FftResolutionHz << " Hz"
-                                  << " ncoHz=" << ncoHz_.load(std::memory_order_relaxed) << " Hz"
-                                  << " slew=" << cfg_.MaxHzSlewRate << " Hz/s"
-                                  << " alpha=" << cfg_.NcoHzEmaAlpha
-                                  << " gainDb=" << gainDb_.load(std::memory_order_relaxed)
-                                  << " pwrEma=" << pwrEma_
-                                  << " pwrRef=" << pwrRef_
-                                  << " vivaAvgPwr=" << r.AvgPower
-                                  << std::endl;
+                        if (displayPeriodSec_ > 0.0) {
+                            std::cout << "[CentralFreq] \033[32mDetected\033[0m offset=" << targetHz << " Hz"
+                                      << " [window " << cfg_.EstimationBlockSamples << " samples]"
+                                      << " t_sim=" << t_sim << " s"
+                                      << " t_rate=" << t_rate << " s"
+                                      << " peak/median=" << r.PeakToMedian
+                                      << " (threshold " << cfg_.Estimator.PeakToMedianThreshold << ")"
+                                      << " dF=" << r.FftResolutionHz << " Hz"
+                                      << " ncoHz=" << ncoHz_.load(std::memory_order_relaxed) << " Hz"
+                                      << " slew=" << cfg_.MaxHzSlewRate << " Hz/s"
+                                      << " alpha=" << cfg_.NcoHzEmaAlpha
+                                      << " gainDb=" << gainDb_.load(std::memory_order_relaxed)
+                                      << " pwrEma=" << pwrEma_
+                                      << " pwrRef=" << pwrRef_
+                                      << " vivaAvgPwr=" << r.AvgPower
+                                      << std::endl;
+                        }
                         lastEstLog = now;
                     }
                 }

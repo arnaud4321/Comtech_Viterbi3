@@ -50,6 +50,36 @@ void Params::ReadParams(string FileName)
         SimMode = ACQ_SIM;
     else
         SimMode = CONT_SIM;
+
+    if (j.contains("Operation")) {
+        Tmp = j["Operation"].value("Mode", 0);
+        switch(Tmp) {
+            case 0: OpMode = NOT_OP; break;
+            case 1: OpMode = TX_ONLY; break;
+            case 2: OpMode = RX_ONLY; break;
+            case 3: OpMode = TX_RX; break;
+            default: OpMode = NOT_OP; break;
+        }
+        RxFreq = j["Operation"].value("RxFreq", 2000e6);
+        TxFreq = j["Operation"].value("TxFreq", 2000e6);
+        TxGaindb = j["Operation"].value("TxGaindb", 20.0);
+        RxSampleRate = j["Operation"].value("RxSampleRate", 21.42e6);
+        TxSampleRate = j["Operation"].value("TxSampleRate", 21.42e6);
+        ref = j["Operation"].value("ref", "internal");
+    } else {
+        OpMode = NOT_OP;
+        RxFreq = 2000e6;
+        TxFreq = 2000e6;
+        TxGaindb = 20.0;
+        RxSampleRate = 21.42e6;
+        TxSampleRate = 21.42e6;
+        ref = "internal";
+    }
+
+    SamplingFrequency = RxSampleRate;
+    SymbolRate = SamplingFrequency / 2.0;
+    SamplingRate = SamplingFrequency;
+    TxOutputBatchDuration = (static_cast<double>(TxOutputBatchSize) / 2.0) / SamplingRate;
     
 	NumErrors = j["Simulation"]["NumErrors"];
 	Seed = j["Simulation"]["Seed"];
