@@ -125,20 +125,24 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
         constellationDisplay_ = std::make_unique<ConstellationDisplay>();
         if (!constellationDisplay_->Start(constellationCfg_))
         {
-            std::cout << "[Constellation] \033[31mDisabled\033[0m (failed to start backend)"
-                      << " (Backend=" << constellationCfg_.Backend << ")"
-                      << std::endl;
+            if (displayPeriodSec_ > 0.0) {
+                // std::cout << "[Constellation] \033[31mDisabled\033[0m (failed to start backend)"
+                //           << " (Backend=" << constellationCfg_.Backend << ")"
+                //           << std::endl;
+            }
             constellationDisplay_.reset();
         }
         else
         {
-            std::cout << "[Constellation] \033[32mEnabled\033[0m"
-                      << " backend=" << constellationCfg_.Backend
-                      << " period=" << constellationCfg_.PeriodSec << " s"
-                      << " N=" << constellationCfg_.NumSymbols
-                      << " XDisplay=" << (constellationCfg_.XDisplay.empty() ? "(inherit)" : constellationCfg_.XDisplay)
-                      << " pid=" << (constellationDisplay_ ? constellationDisplay_->GetChildPid() : -1)
-                      << std::endl;
+            if (displayPeriodSec_ > 0.0) {
+                // std::cout << "[Constellation] \033[32mEnabled\033[0m"
+                //           << " backend=" << constellationCfg_.Backend
+                //           << " period=" << constellationCfg_.PeriodSec << " s"
+                //           << " N=" << constellationCfg_.NumSymbols
+                //           << " XDisplay=" << (constellationCfg_.XDisplay.empty() ? "(inherit)" : constellationCfg_.XDisplay)
+                //           << " pid=" << (constellationDisplay_ ? constellationDisplay_->GetChildPid() : -1)
+                //           << std::endl;
+            }
         }
     }
     oBufferFilter.Reset();
@@ -191,32 +195,44 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
 void Receiver::StopThreads(void)
 {
     StopAll = true;
+    std::cout << "[Receiver::StopThreads] Notifying filter waiters..." << std::endl;
     if (pSampler)
         pSampler->NotifyFilterWaiters();
+    std::cout << "[Receiver::StopThreads] Notifying receiver CVs..." << std::endl;
     CvRx2Out.notify_all();
     CvOut2Rx.notify_all();
     CvVitManager2Vit.notify_all();
     CvFilterUser.notify_all();
     CvResampData.notify_all();
     CvFreqCorrData.notify_all();
+    std::cout << "[Receiver::StopThreads] Joining FilterThread..." << std::endl;
     if(FilterThread.joinable())
         FilterThread.join();
+    std::cout << "[Receiver::StopThreads] Joining resampler..." << std::endl;
     resampler_.StopJoin();
+    std::cout << "[Receiver::StopThreads] Joining freqCorrector..." << std::endl;
     freqCorrector_.StopJoin();
+    std::cout << "[Receiver::StopThreads] Joining timingTracking..." << std::endl;
     timingTracking_.StopJoin();
+    std::cout << "[Receiver::StopThreads] Joining phaseTrackingDD..." << std::endl;
     phaseTrackingDD_.StopJoin();
+    std::cout << "[Receiver::StopThreads] Closing constellation display..." << std::endl;
     if (constellationDisplay_)
         constellationDisplay_->ClosePipeKeepAlive();
     constellationDisplay_.reset();
+    std::cout << "[Receiver::StopThreads] Notifying Viterbi managers..." << std::endl;
     for(int i = 0; i < 3;i++)
-        CvViterbis2VitManager[i].notify_one();
+        CvViterbis2VitManager[i].notify_all();
+    std::cout << "[Receiver::StopThreads] Joining Viterbi threads..." << std::endl;
     for(int i = 0; i < 3;i++)
     {
         if(ViterbiThreads[i].joinable())
             ViterbiThreads[i].join();
     }
+    std::cout << "[Receiver::StopThreads] Joining ViterbiManagerThread..." << std::endl;
     if(ViterbiManagerThread.joinable())
         ViterbiManagerThread.join();
+    std::cout << "[Receiver::StopThreads] Done." << std::endl;
 }
 
 /**
@@ -344,33 +360,37 @@ void Receiver::OperateFilter(void)
                     const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
                     const double t_sim =
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-                    std::cout << "[SymbolRateEstimator] \033[32mDetected\033[0m: " << (est.SymbolRateHz / 1e6)
-                              << " Msym/s"
-                              << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
-                              << " t_sim=" << t_sim << " s"
-                              << " t_rate=" << t_rate << " s"
-                              << " (search kMax=" << est.SearchKMaxBins
-                              << ", fMax=" << est.SearchMaxOffsetHz << " Hz)"
-                              << " (FFT res " << est.FftResolutionHz
-                              << " Hz, peak/median " << est.PeakToMedian
-                              << ", threshold " << SymRatePeakToMedianThreshold << ")" << std::endl;
+                    if (displayPeriodSec_ > 0.0) {
+                        std::cout << "[SymbolRateEstimator] \033[32mDetected\033[0m: " << (est.SymbolRateHz / 1e6)
+                                  << " Msym/s"
+                                  << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                                  << " t_sim=" << t_sim << " s"
+                                  << " t_rate=" << t_rate << " s"
+                                  << " (search kMax=" << est.SearchKMaxBins
+                                  << ", fMax=" << est.SearchMaxOffsetHz << " Hz)"
+                                  << " (FFT res " << est.FftResolutionHz
+                                  << " Hz, peak/median " << est.PeakToMedian
+                                  << ", threshold " << SymRatePeakToMedianThreshold << ")" << std::endl;
+                    }
                 }
                 else
                 {
                     const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
                     const double t_sim =
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-                    std::cout << "[SymbolRateEstimator] \033[31mNot detected\033[0m"
-                              << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
-                              << " t_sim=" << t_sim << " s"
-                              << " t_rate=" << t_rate << " s"
-                              << " (reason: " << (est.FailReason ? est.FailReason : "") << ")"
-                              << " (search kMax=" << est.SearchKMaxBins
-                              << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
-                              << ", dF=" << est.FftResolutionHz << " Hz"
-                              << ", peak/median=" << est.PeakToMedian
-                              << ", threshold=" << SymRatePeakToMedianThreshold << ")"
-                              << std::endl;
+                    if (displayPeriodSec_ > 0.0) {
+                        std::cout << "[SymbolRateEstimator] \033[31mNot detected\033[0m"
+                                  << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                                  << " t_sim=" << t_sim << " s"
+                                  << " t_rate=" << t_rate << " s"
+                                  << " (reason: " << (est.FailReason ? est.FailReason : "") << ")"
+                                  << " (search kMax=" << est.SearchKMaxBins
+                                  << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
+                                  << ", dF=" << est.FftResolutionHz << " Hz"
+                                  << ", peak/median=" << est.PeakToMedian
+                                  << ", threshold=" << SymRatePeakToMedianThreshold << ")"
+                                  << std::endl;
+                    }
                 }
             }
             else if (est.Detected)
@@ -397,13 +417,15 @@ void Receiver::OperateFilter(void)
                         const double t_sim =
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
                         const double delta_ppm = (refined - prev) * 1.0e6 / std::max(1.0, prev);
-                        std::cout << "[SymbolRateEstimator] \033[32mRe-estimated\033[0m: " << (refined / 1e6)
-                                  << " Msym/s"
-                                  << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
-                                  << " t_sim=" << t_sim << " s"
-                                  << " t_rate=" << t_rate << " s"
-                                  << " (delta " << delta_ppm << " ppm, peak/median " << est.PeakToMedian << ")"
-                                  << std::endl;
+                        if (displayPeriodSec_ > 0.0) {
+                            std::cout << "[SymbolRateEstimator] \033[32mRe-estimated\033[0m: " << (refined / 1e6)
+                                      << " Msym/s"
+                                      << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                                      << " t_sim=" << t_sim << " s"
+                                      << " t_rate=" << t_rate << " s"
+                                      << " (delta " << delta_ppm << " ppm, peak/median " << est.PeakToMedian << ")"
+                                      << std::endl;
+                        }
                     }
                 }
             }
@@ -412,22 +434,24 @@ void Receiver::OperateFilter(void)
                 const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
                 const double t_sim =
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-                std::cout << "[SymbolRateEstimator] \033[31mRe-estimation not detected\033[0m"
-                          << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
-                          << " t_sim=" << t_sim << " s"
-                          << " t_rate=" << t_rate << " s"
-                          << " (reason: " << (est.FailReason ? est.FailReason : "") << ")"
-                          << " (search kMax=" << est.SearchKMaxBins
-                          << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
-                          << ", dF=" << est.FftResolutionHz << " Hz"
-                          << ", peak/median=" << est.PeakToMedian << ")"
-                          << std::endl;
+                if (displayPeriodSec_ > 0.0) {
+                    std::cout << "[SymbolRateEstimator] \033[31mRe-estimation not detected\033[0m"
+                              << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                              << " t_sim=" << t_sim << " s"
+                              << " t_rate=" << t_rate << " s"
+                              << " (reason: " << (est.FailReason ? est.FailReason : "") << ")"
+                              << " (search kMax=" << est.SearchKMaxBins
+                              << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
+                              << ", dF=" << est.FftResolutionHz << " Hz"
+                              << ", peak/median=" << est.PeakToMedian << ")"
+                              << std::endl;
+                }
             }
             symrate_collecting = false;
             SymRateBatchCounter = 0;
 
             // Only display the "current estimate" line when a new estimate was accepted.
-            if (newSymRateEstimate)
+            if (newSymRateEstimate && displayPeriodSec_ > 0.0)
             {
                 std::cout << "Current symbol rate estimate: "
                           << (SymbolRateEstimateHz.load(std::memory_order_relaxed) / 1e6)
@@ -445,8 +469,10 @@ void Receiver::OperateFilter(void)
 
         if (std::chrono::duration<double>(now_sym - symrate_display_start).count() >= 1.0)
         {
-            if (!SymbolRateDetected.load(std::memory_order_relaxed))
-                std::cout << "Waiting for symbol-rate detection..." << std::endl;
+            if (!SymbolRateDetected.load(std::memory_order_relaxed) && displayPeriodSec_ > 0.0)
+            {
+                // std::cout << "Waiting for symbol-rate detection..." << std::endl;
+            }
             symrate_display_start = now_sym;
         }
 
@@ -471,8 +497,8 @@ void Receiver::OperateFilter(void)
                 std::chrono::duration<double>(now_tp - rx_filter_console_window_start).count();
             if (displayPeriodSec_ > 0.0 && dtConsole >= displayPeriodSec_)
             {
-                std::cout << "[RXFilter] throughput=" << lastRxFilterThroughputMsps_.load(std::memory_order_relaxed)
-                          << " Msps" << std::endl;
+                // std::cout << "[RXFilter] throughput=" << lastRxFilterThroughputMsps_.load(std::memory_order_relaxed)
+                //           << " Msps" << std::endl;
                 rx_filter_console_window_start = std::chrono::steady_clock::now();
             }
 
@@ -877,13 +903,15 @@ void Receiver::OperateViterbiManager(void)
             RawSyncLocked.store(true, std::memory_order_relaxed);
             rawCorrDone = true;
 
-            std::cout << "[RAW] \033[32mLOCKED\033[0m"
-                      << " peakToMean=" << peakToMean
-                      << " thr=" << kPeakToMeanThr
-                      << " peakAbs=" << bestMag
-                      << " phaseRad=" << std::atan2(bestIm, bestRe)
-                      << " lagSym=" << bestLag
-                      << std::endl;
+            if (displayPeriodSec_ > 0.0) {
+                // std::cout << "[RAW] \033[32mLOCKED\033[0m"
+                //           << " peakToMean=" << peakToMean
+                //           << " thr=" << kPeakToMeanThr
+                //           << " peakAbs=" << bestMag
+                //           << " phaseRad=" << std::atan2(bestIm, bestRe)
+                //           << " lagSym=" << bestLag
+                //           << std::endl;
+            }
 
             // Compute SER + raw BER on the aligned window using hard decisions.
             const double phase = std::atan2(bestIm, bestRe);
@@ -1208,11 +1236,14 @@ skip_raw:;
                                 break;   
                             }
                             ViterbiSynchronized = true;
-                            std::cout << "[ViterbiSync] \033[32mLOCKED\033[0m"
-                                      << " thresh=" << ViterbiThreshold1
-                                      << " minMargin=(" << minMargin[0] << ", " << minMargin[1] << ", " << minMargin[2] << ")"
-                                      << " bestIndex=(" << BestIndex[0] << ", " << BestIndex[1] << ", " << BestIndex[2] << ")"
-                                      << std::endl;
+                            if (displayPeriodSec_ > 0.0)
+                            {
+                                std::cout << "[ViterbiSync] \033[32mLOCKED\033[0m"
+                                          << " thresh=" << ViterbiThreshold1
+                                          << " minMargin=(" << minMargin[0] << ", " << minMargin[1] << ", " << minMargin[2] << ")"
+                                          << " bestIndex=(" << BestIndex[0] << ", " << BestIndex[1] << ", " << BestIndex[2] << ")"
+                                          << std::endl;
+                            }
                             prevViterbiLocked = true;
                             for(int i = 0; i < 3; i++)
                                 oViterbi[i].reset_decoder();
@@ -1293,7 +1324,9 @@ skip_raw:;
                         NumBitsAll = 0;
                         NumErrorsAll = 0;
                         
-                        std::cout << "[ViterbiSync] \033[31mDESYNC\033[0m EmaMetricsGrowth=" << CurrDebugStatistics.EmaMetricsGrowth << " > " << kViterbiDesyncGrowthThr << std::endl;
+                        if (displayPeriodSec_ > 0.0) {
+                            std::cout << "[ViterbiSync] \033[31mDESYNC\033[0m EmaMetricsGrowth=" << CurrDebugStatistics.EmaMetricsGrowth << " > " << kViterbiDesyncGrowthThr << std::endl;
+                        }
                         // Reset stats for next sync
                         CurrDebugStatistics.NumBatches = 0;
                         CurrDebugStatistics.SumMetricsGrowth = 0;
@@ -1350,17 +1383,16 @@ skip_raw:;
                             // When PRBSInjectStride > 0, PRBS sync should fail (stay unlocked).
                             InjectPRBSErrorDeterministic(OutputAll + PtrRdOut, BatchSize3);
                             PRBSSynchronized = SyncPRBS(OutputAll+PtrRdOut, PtrStart, PRBSSeed, NumErrorsAtLock);
-                            if(PRBSSynchronized)
-                            {
+                            if (displayPeriodSec_ > 0.0) {
                                 std::cout << "[PRBS] \033[32mLOCKED\033[0m"
                                           << " NumErrors=" << NumErrorsAtLock
                                           << " thresh=" << PRBSThreshold
                                           << " PtrStart=" << PtrStart
                                           << " Seed=" << PRBSSeed
                                           << std::endl;
-                                oPrbs.CreateOutputs(PRBSSeed, BatchSize3 - PtrStart, PrbsOut);
-                                CountErrors(OutputAll+PtrRdOut+PtrStart, PrbsOut, BatchSize3-PtrStart);
                             }
+                            oPrbs.CreateOutputs(PRBSSeed, BatchSize3 - PtrStart, PrbsOut);
+                            CountErrors(OutputAll+PtrRdOut+PtrStart, PrbsOut, BatchSize3-PtrStart);
                         }
                         else {
                             oPrbs.CreateOutputs(PRBSSeed, BatchSize3, PrbsOut);
@@ -1371,7 +1403,9 @@ skip_raw:;
                             uint64_t diffBits = NumBitsAll - prevBits;
                             if (diffBits > 0 && (static_cast<double>(diffErrors) / static_cast<double>(diffBits)) > 0.3) {
                                 PRBSSynchronized = false;
-                                std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER detected (" << diffErrors << "/" << diffBits << ")" << std::endl;
+                                if (displayPeriodSec_ > 0.0) {
+                                    std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER detected (" << diffErrors << "/" << diffBits << ")" << std::endl;
+                                }
                             }
                         }
                         OutputQ.AdvanceRead();
