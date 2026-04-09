@@ -126,22 +126,22 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
         if (!constellationDisplay_->Start(constellationCfg_))
         {
             if (displayPeriodSec_ > 0.0) {
-                // std::cout << "[Constellation] \033[31mDisabled\033[0m (failed to start backend)"
-                //           << " (Backend=" << constellationCfg_.Backend << ")"
-                //           << std::endl;
+                std::cout << "[Constellation] \033[31mDisabled\033[0m (failed to start backend)"
+                          << " (Backend=" << constellationCfg_.Backend << ")"
+                          << std::endl;
             }
             constellationDisplay_.reset();
         }
         else
         {
             if (displayPeriodSec_ > 0.0) {
-                // std::cout << "[Constellation] \033[32mEnabled\033[0m"
-                //           << " backend=" << constellationCfg_.Backend
-                //           << " period=" << constellationCfg_.PeriodSec << " s"
-                //           << " N=" << constellationCfg_.NumSymbols
-                //           << " XDisplay=" << (constellationCfg_.XDisplay.empty() ? "(inherit)" : constellationCfg_.XDisplay)
-                //           << " pid=" << (constellationDisplay_ ? constellationDisplay_->GetChildPid() : -1)
-                //           << std::endl;
+                std::cout << "[Constellation] \033[32mEnabled\033[0m"
+                          << " backend=" << constellationCfg_.Backend
+                          << " period=" << constellationCfg_.PeriodSec << " s"
+                          << " N=" << constellationCfg_.NumSymbols
+                          << " XDisplay=" << (constellationCfg_.XDisplay.empty() ? "(inherit)" : constellationCfg_.XDisplay)
+                          << " pid=" << (constellationDisplay_ ? constellationDisplay_->GetChildPid() : -1)
+                          << std::endl;
             }
         }
     }
@@ -894,23 +894,32 @@ void Receiver::OperateViterbiManager(void)
             RawSyncLagSym.store(bestLag, std::memory_order_relaxed);
             RawSyncPeakPhaseRad.store(std::atan2(bestIm, bestRe), std::memory_order_relaxed);
 
+            bool rawLockedPrev = RawSyncLocked.load(std::memory_order_relaxed);
             if (!(peakToMean > kPeakToMeanThr))
             {
+                if (displayPeriodSec_ > 0.0 && rawLockedPrev) {
+                    std::cout << "[RAW] \033[31mUNLOCKED\033[0m"
+                              << " peakToMean=" << peakToMean
+                              << " thr=" << kPeakToMeanThr
+                              << std::endl;
+                    RawSyncLocked.store(false, std::memory_order_relaxed);
+                }
                 // Reset state and skip so we try again next time PhaseDD is locked
                 goto skip_raw;
             }
 
-            RawSyncLocked.store(true, std::memory_order_relaxed);
-            rawCorrDone = true;
-
-            if (displayPeriodSec_ > 0.0) {
-                // std::cout << "[RAW] \033[32mLOCKED\033[0m"
-                //           << " peakToMean=" << peakToMean
-                //           << " thr=" << kPeakToMeanThr
-                //           << " peakAbs=" << bestMag
-                //           << " phaseRad=" << std::atan2(bestIm, bestRe)
-                //           << " lagSym=" << bestLag
-                //           << std::endl;
+            if (!rawLockedPrev) {
+                RawSyncLocked.store(true, std::memory_order_relaxed);
+                rawCorrDone = true;
+                if (displayPeriodSec_ > 0.0) {
+                    std::cout << "[RAW] \033[32mLOCKED\033[0m"
+                              << " peakToMean=" << peakToMean
+                              << " thr=" << kPeakToMeanThr
+                              << " peakAbs=" << bestMag
+                              << " phaseRad=" << std::atan2(bestIm, bestRe)
+                              << " lagSym=" << bestLag
+                              << std::endl;
+                }
             }
 
             // Compute SER + raw BER on the aligned window using hard decisions.
@@ -1383,7 +1392,8 @@ skip_raw:;
                             // When PRBSInjectStride > 0, PRBS sync should fail (stay unlocked).
                             InjectPRBSErrorDeterministic(OutputAll + PtrRdOut, BatchSize3);
                             PRBSSynchronized = SyncPRBS(OutputAll+PtrRdOut, PtrStart, PRBSSeed, NumErrorsAtLock);
-                            if (displayPeriodSec_ > 0.0) {
+                            if (displayPeriodSec_ > 0.0)
+                            {
                                 std::cout << "[PRBS] \033[32mLOCKED\033[0m"
                                           << " NumErrors=" << NumErrorsAtLock
                                           << " thresh=" << PRBSThreshold
@@ -1403,9 +1413,9 @@ skip_raw:;
                             uint64_t diffBits = NumBitsAll - prevBits;
                             if (diffBits > 0 && (static_cast<double>(diffErrors) / static_cast<double>(diffBits)) > 0.3) {
                                 PRBSSynchronized = false;
-                                if (displayPeriodSec_ > 0.0) {
-                                    std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER detected (" << diffErrors << "/" << diffBits << ")" << std::endl;
-                                }
+                            if (displayPeriodSec_ > 0.0 && !PRBSSynchronized) {
+                                std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER detected (" << diffErrors << "/" << diffBits << ")" << std::endl;
+                            }
                             }
                         }
                         OutputQ.AdvanceRead();
