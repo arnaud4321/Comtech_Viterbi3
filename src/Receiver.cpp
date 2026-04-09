@@ -920,6 +920,9 @@ void Receiver::OperateViterbiManager(void)
                               << " lagSym=" << bestLag
                               << std::endl;
                 }
+            } else {
+                RawSyncLocked.store(true, std::memory_order_relaxed);
+                rawCorrDone = true;
             }
 
             // Compute SER + raw BER on the aligned window using hard decisions.
