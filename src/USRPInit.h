@@ -1,3 +1,7 @@
+/**
+ * @file USRPInit.h
+ * @brief USRP hardware initialization via the UHD API.
+ */
 #pragma once
 
 #include <uhd/usrp/multi_usrp.hpp>
@@ -6,6 +10,13 @@
 using namespace std;
 typedef std::function<uhd::sensor_value_t(const std::string &)> get_sensor_fn_t;
 
+/**
+ * @brief Handles the initial configuration and setup of a USRP device.
+ * 
+ * @details This class is responsible for opening the device via `uhd::usrp::multi_usrp::make()`,
+ * configuring sampling rates, center frequencies, gains, and checking PLL lock status
+ * before the TX and RX DSP pipelines are started.
+ */
 class USRPInit
 {
 private:

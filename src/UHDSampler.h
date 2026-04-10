@@ -1,3 +1,7 @@
+/**
+ * @file UHDSampler.h
+ * @brief USRP hardware sampler implementation using the UHD API.
+ */
 #pragma once
 #include <uhd/exception.hpp>
 #include <uhd/types/tune_request.hpp>
@@ -19,6 +23,9 @@ using namespace std;
 
 typedef std::function<uhd::sensor_value_t(const std::string &)> get_sensor_fn_t;
 
+/**
+ * @brief Parameters passed to the UHD sampler thread.
+ */
 struct SamplerParams
 {
     BufferShort *pBuff;
@@ -27,6 +34,13 @@ struct SamplerParams
     uhd::usrp::multi_usrp::sptr usrp;
 };
 
+/**
+ * @brief Inherits from @ref Sampler to acquire IQ samples directly from a USRP.
+ * 
+ * @details This class wraps the `uhd::rx_streamer` API. It continuously receives data
+ * from the USRP and feeds it into the provided `BufferShort` ring buffer. It also
+ * monitors hardware overflows (`O` events) and hardware throughput.
+ */
 class UHDSampler: public Sampler
 {
 private:
