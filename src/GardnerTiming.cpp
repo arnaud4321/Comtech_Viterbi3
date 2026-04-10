@@ -112,8 +112,9 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
         }
     }
 
-    // Strict no-clamp: if cursor exits valid interpolation region, re-arm and output 0.
-    if ((tAbs_ < oldestSafe) || (tAbs_ > newestSafeNow))
+    // Strict no-clamp: if cursor exits valid interpolation region backwards, re-arm.
+    // If it exits forwards (tAbs_ > newestSafeNow), it's normal (consumed all data), just break later.
+    if (tAbs_ < oldestSafe)
     {
         tInit_ = false;
         return 0;

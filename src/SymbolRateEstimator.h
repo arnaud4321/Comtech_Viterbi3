@@ -18,6 +18,8 @@ struct SymbolRateEstimatorConfig
     double EstimatePeriodSec = 1.0;
     double PeakToMedianThreshold = 8.0;
     double MaxRelativeJump = 0.02;
+    /// If false, only the first successful symbol-rate detection moves the resampler; later FFT refinements are ignored (stabler USRP / lab).
+    bool AllowRefinement = true;
 };
 
 /** @brief Single estimation outcome (may be failure with @ref FailReason). */
@@ -44,7 +46,8 @@ struct SymbolRateEstimateResult
  * **Reference bin @f$k_0@f$** — @f$k_0=\mathrm{round}\bigl((F_s/2)\cdot N/f_{s,\mathrm{used}}\bigr)@f$ with @f$F_s=@f$@c FsHz (member). So bin @f$k_0@f$ corresponds to **physical** @f$F_s/2@f$ Hz
  * on a grid sampled at @f$f_{s,\mathrm{used}}@f$ (either @f$F_s@f$ or @f$F_s\cdot@f$@c OsFactor).
  * **Search** — Half-width in bins @f$k_{\max}=\min(N/2-2,\,\mathrm{round}(\texttt{MaxOffsetHz}\cdot N/f_{s,\mathrm{used}}))@f$. For integers @f$m@f$ from @f$k_0-k_{\max}@f$
- * to @f$k_0+k_{\max}@f$, map @f$m@f$ to @f$[0,N)@f$ by wrap-around, score @f$|X|^2@f$, keep strongest bin whose wrapped index is **not** @f$k_0@f$.
+ * to @f$k_0+k_{\max}@f$, map @f$m@f$ to @f$[0,N)@f$ by wrap-around, score @f$|X|^2@f$. **Pick** among bins within ~92\\% of the band
+ * maximum the one **closest** to @f$k_0@f$ (circular bin distance), then strongest — ties the baud line near @f$F_s/2@f$ at 2 Sps.
  * **Refinement** — Parabolic interpolation on three @f$|X|^2@f$ samples; peak frequency → @ref SymbolRateEstimateResult::SymbolRateHz.
  * **Gating** — Peak/median ratio and relative change vs previous estimate are applied in @ref Receiver when consuming results.
  */

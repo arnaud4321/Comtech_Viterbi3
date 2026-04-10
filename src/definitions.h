@@ -21,18 +21,20 @@ const int ReceiverInputBatchIQSymbols = BatchSize3;
 const int SPB = 8192;
 inline double SamplingFrequency = 21.42e6;
 
-/** @brief Float ring length (per I/Q) for RX @c BufferFloat stages (filter, resampler, freq corrector). Larger ⇒ more headroom under backpressure. */
-inline constexpr int kRxRingFloatLen = SPB * 1024;
+/** @brief Float ring length (per I/Q) for RX @c BufferFloat stages (filter, resampler, freq corrector).
+ *  4096×SPB ≈ 4 s at 4 Msps — large enough for USRP transients (symbol-rate + VIVA first-lock). */
+inline constexpr int kRxRingFloatLen = SPB * 4096;
 /** @brief Extra margin for wrapped access in RX @c BufferFloat rings. */
 inline constexpr int kRxRingFloatExtra = SPB * 64;
-/** @brief Interleaved-short ring length for AWGN channel output and @ref Sampler (shorts). */
-inline constexpr int kSamplerShortRingSize = 1024 * SPB;
+/** @brief Interleaved-short ring length for AWGN channel output and @ref Sampler (shorts).
+ *  4096×SPB ≈ 4 s at 4 Msps — absorbs startup stalls before the DSP chain reaches steady state. */
+inline constexpr int kSamplerShortRingSize = 4096 * SPB;
 inline constexpr int kSamplerShortRingExtra = 4 * SPB;
 /** @brief @c BufferShort capacity (shorts) on AWGN output path (ties to @ref TxOutputBatchSize). */
 inline constexpr int kChannelOutShortRingSize = 256 * TxOutputBatchSize;
 inline constexpr int kChannelOutShortRingExtra = 4 * TxOutputBatchSize;
 /** @brief Resampler internal FIFO cap (floats per I/Q); bounds drain from matched-filter ring. */
-inline constexpr int kResamplerFifoMaxSamples = SPB * 1024;
+inline constexpr int kResamplerFifoMaxSamples = SPB * 4096;
 /** @brief SCO input queue depth (float batches) before @ref ChannelSamplingClockOffset::EnqueueNoisyInterleaved blocks. */
 inline constexpr int kScoInputQueueDepth = 36;
 
@@ -51,6 +53,11 @@ enum OpModes
 };
 const float ViterbiThreshold1 = 80; //difference between best metric and other 3 options
 const int PRBSThreshold = 12;
+
+struct PhaseTrackingConfig {
+    double Kp = 0.01;
+    double Ki = 5.0e-6;
+};
 
 /**
  * @brief PRBS test injection: deterministic bit flips applied before PRBS sync search.

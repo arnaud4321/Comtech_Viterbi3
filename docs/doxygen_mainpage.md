@@ -47,7 +47,7 @@ Optional **compile definitions** (documented in source where used):
 
 - `ENABLE_CONSOLE_ALERTS` — emit backpressure / saturation console messages.
 - `PHASE_DD_USE_LIBM_ATAN2` — use `std::atan2` instead of the fast polynomial in decision-directed phase error (@ref ReceiverPhaseTrackingDD).
-- `ENABLE_RAW_PREVITERBI_METRICS` — enables the continuous raw pre-Viterbi intercorrelation, SER, and BER computation blocks in the Receiver.
+- `ENABLE_RAW_PREVITERBI_METRICS` — enables the continuous raw pre-Viterbi intercorrelation, SER, and BER computation blocks in the Receiver. **WARNING: Must be DISABLED when running with USRP (Mode 1 or 3) as the O(N^2) brute-force correlation causes severe CPU choking and catastrophic t_rate drop.**
 - `DEBUG_STATISTICS` — tracks Viterbi decoding metric growth to compute an EMA. It is used to dynamically unlock and resync the Viterbi decoder under very low SNR conditions (e.g., when the channel drops below the "cliff" at ~1.9dB, using a threshold of `kViterbiDesyncGrowthThr = 40.0`).
 
 Generate this HTML reference from the repository root:
@@ -83,6 +83,8 @@ The simulation is controlled via a JSON configuration file (e.g. `src/config.jso
   - `AccelerationPeriod`, `StablePeriod`: defines the duration of the piecewise ramps and stable states.
 - **CentralFrequency**: parameters for the coarse frequency estimator (VIVA), NCO smoothing, and AGC targets.
 - **SymbolRateEstimator**: defines the FFT properties and search window to find the exact symbol rate.
+- **TimingTracking**: configures the Gardner timing recovery loop parameters (Kp, Ki).
+- **PhaseTracking**: configures the decision-directed phase PLL parameters (Kp, Ki).
 - **ConstellationDisplay**: UI and Python plotting arguments.
 - **Simulation**: defines the simulation stop modes (e.g., number of errors) and `DisplayPeriodSec` for console telemetry.
 

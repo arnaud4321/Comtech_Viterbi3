@@ -99,16 +99,20 @@ ReceiverPhaseTrackingDD::~ReceiverPhaseTrackingDD()
 }
 
 void ReceiverPhaseTrackingDD::Start(ReceiverTimingTracking* timingTracking, std::atomic<bool>* stopAll,
-                                    double displayPeriodSec)
+                                    double displayPeriodSec, std::atomic<double>* estSymbolRateHz,
+                                    const PhaseTrackingConfig& config)
 {
     timingTracking_ = timingTracking;
     stopAll_ = stopAll;
+    estSymbolRateHz_ = estSymbolRateHz;
     displayPeriodSec_ = displayPeriodSec;
     phaseRad_ = 0.0f;
     freqRadPerSym_ = 0.0f;
     errEma_ = 0.0f;
     lockCount_ = 0;
     locked_.store(false, std::memory_order_relaxed);
+    kp_ = static_cast<float>(config.Kp);
+    ki_ = static_cast<float>(config.Ki);
 
     threadRunning_ = true;
     thread_ = std::thread(&ReceiverPhaseTrackingDD::ThreadMain, this);
@@ -360,10 +364,17 @@ void ReceiverPhaseTrackingDD::ThreadMain()
         lastEvmRms_.store(static_cast<double>(blockEvmRms), std::memory_order_relaxed);
 
         symbols_total += static_cast<uint64_t>(kSymFrame);
+        const double rsDenom = (estSymbolRateHz_ != nullptr)
+                                   ? ([&]() {
+                                           const double e =
+                                               estSymbolRateHz_->load(std::memory_order_relaxed);
+                                           return (e > 1.0) ? e : SymbolRate;
+                                       }())
+                                   : SymbolRate;
         const bool nowLocked = locked_.load(std::memory_order_relaxed);
         if (nowLocked != prevLocked)
         {
-            const double t_rate = static_cast<double>(symbols_total) / SymbolRate;
+            const double t_rate = static_cast<double>(symbols_total) / rsDenom;
             const double t_sim =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
             if (displayPeriodSec_ > 0.0)
@@ -388,7 +399,7 @@ void ReceiverPhaseTrackingDD::ThreadMain()
                 // freqRadPerSym_ is radians per symbol; convert to Hz using symbol rate.
                 const double f_hz = static_cast<double>(freqRadPerSym_) * SymbolRate / (2.0 * 3.14159265358979323846);
                 lastFreqEstHz_.store(f_hz, std::memory_order_relaxed);
-                const double t_rate = static_cast<double>(symbols_total) / SymbolRate;
+                const double t_rate = static_cast<double>(symbols_total) / rsDenom;
                 const double t_sim = std::chrono::duration<double>(now - wall_start).count();
                 const bool nowLocked2 = locked_.load(std::memory_order_relaxed);
                 double snrEvmDb = (blockEvmRms > 1e-12f) ? (-20.0 * std::log10(blockEvmRms)) : std::numeric_limits<double>::quiet_NaN();

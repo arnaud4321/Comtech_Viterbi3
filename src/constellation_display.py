@@ -220,6 +220,8 @@ line_lock_prbs, = ax_lock.step([], [], "--", lw=1.2, label="PRBS", where="post")
 ax_lock.legend(loc="lower left", fontsize=8)
 
 hist_max = 3000
+# Spectrum FFT: use at most this many samples (subsample the frame) — full N≈2048 FFT each draw is slow in Tk.
+spec_fft_max = 1024
 t_hist = []
 ppm_applied = []
 ppm_sum = []
@@ -246,10 +248,12 @@ while True:
     # Let GUI process events even when no data arrives
     plt.pause(0.001)
     if stdin_closed:
-        # End of simulation: keep windows open until user closes them.
-        if not plt.fignum_exists(fig.number):
-            break
-        continue
+        # Parent closed the pipe without QUIT (e.g. kill -9): close the GUI and exit.
+        try:
+            plt.close(fig)
+        except Exception:
+            pass
+        break
 
     # Read and parse as fast as possible to drain the pipe (prevents slowing down the simulation).
     r, _, _ = select.select([sys.stdin], [], [], 0.05)
@@ -364,15 +368,22 @@ while True:
             px, py = latest_pts
             sc.set_offsets(list(zip(px, py)))
 
-            # Compute and update spectrum
+            # Spectrum: drawn on ax_spec (middle top). Uses only the current FRAME symbols (not the whole run).
+            # Subsample before FFT so redraw stays cheap; constellation above still uses every point.
             if len(px) > 0:
-                c_pts = np.array(px) + 1j * np.array(py)
-                win = np.hanning(len(c_pts))
-                spec = np.fft.fftshift(np.fft.fft(c_pts * win))
+                c_pts = np.asarray(px, dtype=np.float64) + 1j * np.asarray(py, dtype=np.float64)
+                n = len(c_pts)
+                if n > spec_fft_max:
+                    step = max(1, n // spec_fft_max)
+                    c_spec = c_pts[::step][:spec_fft_max]
+                else:
+                    c_spec = c_pts
+                win = np.hanning(len(c_spec))
+                spec = np.fft.fftshift(np.fft.fft(c_spec * win))
                 mag = 20 * np.log10(np.abs(spec) + 1e-12)
                 if len(mag) > 0:
                     mag -= np.max(mag)  # Normalize peak to 0 dB
-                freqs = np.linspace(-0.5, 0.5, len(c_pts))
+                freqs = np.fft.fftshift(np.fft.fftfreq(len(c_spec), d=1.0))
                 line_spec.set_data(freqs, mag)
                 
                 # Autoscale Y if needed, but usually -60 to 5 is fine.

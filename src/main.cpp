@@ -117,7 +117,8 @@ int main(int argc, char* argv[])
 		oRx->SetSampler(objSampler);
 		oRx->SetChannel(oAWGN);
 		oRx->SetTransmitter(oTx);
-		oRx->StartThreads(objParams.RollOff, objParams.TxMode, objParams.SymRateCfg, objParams.DisplayPeriodSec, objParams.CentralFreqCfg, objParams.ConstellationCfg);
+		oRx->StartThreads(objParams.RollOff, objParams.TxMode, objParams.SymRateCfg, objParams.TimingTrackingCfg,
+		                  objParams.DisplayPeriodSec, objParams.CentralFreqCfg, objParams.PhaseTrackingCfg, objParams.ConstellationCfg);
 	}
 	
 	auto Start = std::chrono::high_resolution_clock::now();
@@ -145,22 +146,22 @@ int main(int argc, char* argv[])
 				continue;
 			auto Now = std::chrono::high_resolution_clock::now();
 			std::chrono::duration<double> elapsed = Now - Start;
-			const double t_rate = static_cast<double>(oRx->NumBitsAll) / SymbolRate;
 			
             double snrDb = std::numeric_limits<double>::quiet_NaN();
             if (oAWGN) {
                 auto awgnState = oAWGN->GetCurrentApplied();
                 snrDb = awgnState.SnrDb;
             }
-			double evmRms = oRx->GetPhaseTrackingEvmRms();
-			double snrEvmDb = (evmRms > 1e-12) ? (-20.0 * std::log10(evmRms)) : std::numeric_limits<double>::quiet_NaN();
+			
+			RxStatistics stats = oRx->GetRxStatistics(elapsed.count());
+			
 #ifdef ENABLE_RAW_PREVITERBI_METRICS
 			const bool rawLocked = oRx->RawSyncLocked.load(std::memory_order_relaxed);
 			cout << std::fixed << std::setprecision(6)
 			     << "[Main][RAW] t_sim=" << elapsed.count() << " s"
-			     << " t_rate=" << t_rate << " s"
+			     << " t_rate=" << stats.t_rate << " s"
 			     << " snrDb=" << snrDb
-			     << " snrEvmDb=" << snrEvmDb
+			     << " snrEvmDb=" << stats.snrFromEvmDb
 			     << " RAW_LOCK=" << (rawLocked ? "\033[32mLOCKED\033[0m" : "\033[31mUNLOCKED\033[0m")
 			     << " syms=" << oRx->RawNumSymsAll
 			     << " symErr=" << oRx->RawNumSymErrorsAll
@@ -184,23 +185,39 @@ int main(int argc, char* argv[])
 			     << std::defaultfloat
 			     << endl;
 #endif
-			cout << std::fixed << std::setprecision(6)
-			     << "[Main] t_sim=" << elapsed.count() << " s"
-			     << " t_rate=" << t_rate << " s"
+		cout << std::fixed << std::setprecision(6)
+			     << "[Main] t_sim=" << stats.t_sim << " s"
+			     << " t_rate=" << stats.t_rate << " s"
 			     << " snrDb=" << snrDb
-			     << " snrEvmDb=" << snrEvmDb
-			     << " bits=" << oRx->NumBitsAll
-			     << " errors=" << oRx->NumErrorsAll
+			     << " snrEvmDb=" << stats.snrFromEvmDb
+			     << " evmRms=" << stats.evmRms
+			     << " samplerMsps=" << stats.samplerMsps
+			     << " rxFilterMsps=" << stats.rxFilterMsps
+			     << " symRateLk=" << stats.isSymRateLocked
+			     << " symRateMsps=" << stats.symRateMsps
+			     << " centralRdy=" << stats.isCentralFreqReady
+			     << " ncoHz=" << stats.centralNcoHz
+			     << " gainDb=" << stats.gainDb
+			     << " gardnerLk=" << stats.isGardnerLocked
+			     << " gardnerPpm=" << stats.gardnerPpm
+			     << " phaseLk=" << stats.isPhaseLocked
+			     << " phaseFreqHz=" << stats.phaseFreqHz
+			     << " vitLk=" << stats.isViterbiLocked
+			     << " prbsLk=" << stats.isPrbsLocked
+			     << " bits=" << stats.numBits
+			     << " errors=" << stats.numErrors
 			     << " BER=" << std::scientific << std::setprecision(6)
-			     << (static_cast<double>(oRx->NumErrorsAll) / std::max(1.0, static_cast<double>(oRx->NumBitsAll)))
-			     << std::defaultfloat
-			     << endl;
+			     << stats.ber
+			     << std::defaultfloat;
+		if (stats.uhdOverflows > 0)
+			cout << " uhdOverflows=" << stats.uhdOverflows;
+		cout << endl;
 			#ifdef DEBUG_STATISTICS
 			cout << std::fixed << std::setprecision(6)
 			     << "[Viterbi] mean_metrics_growth=" << oRx->CurrDebugStatistics.MeanMetricsGrowth
 			     << " max_metrics_growth=" << oRx->CurrDebugStatistics.MaxMetricsGrowth
-			     << " t_sim=" << elapsed.count() << " s"
-			     << " t_rate=" << t_rate << " s"
+			     << " t_sim=" << stats.t_sim << " s"
+			     << " t_rate=" << stats.t_rate << " s"
 			     << endl;
 			#endif
 		}

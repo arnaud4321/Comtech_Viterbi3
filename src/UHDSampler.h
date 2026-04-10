@@ -97,12 +97,14 @@ void OperateSampler(SamplerParams *p)
 };
 
 bool EndRecording = false;
+std::atomic<uint64_t> overflowCount_{0};
 
 public:
     UHDSampler(uhd::usrp::multi_usrp::sptr usrp, int recmode = 0);
     ~UHDSampler();
     void StartThread() override;
     void StopThread() override;
+    uint64_t GetOverflowCount() const override { return overflowCount_.load(std::memory_order_relaxed); }
     void SetFrequency(double Frequency)
     {
         FreqIn = Frequency;

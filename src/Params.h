@@ -8,13 +8,16 @@ using namespace std;
 #include "definitions.h"
 #include <immintrin.h>
 #include "SymbolRateEstimator.h"
+#include "ReceiverTimingTracking.h"
 #include "ReceiverFreqCorrector.h"
 #include "ConstellationDisplay.h"
 
 /**
  * @brief Runtime parameters loaded from a JSON configuration file.
  *
- * Paths and numeric fields map to `config.json` sections (Channel, Simulation, SymbolRate, etc.).
+ * JSON layout: @c Transmitter, @c Receiver, @c Channel, @c Operation (@c Mode, @c ref), @c Simulation.
+ * Sous-objets RX peuvent être sous @c Receiver ou à la racine (compat.). @c Simulation.OperationMode /
+ * @c ClockReference restent des repli si @c Operation est absent.
  */
 class Params
 {
@@ -51,7 +54,9 @@ public:
     /// Console status: >0 = periodic interval (s); <=0 = events only (lock/unlock, etc.), no periodic lines.
     double DisplayPeriodSec = 1.0;
     SymbolRateEstimatorConfig SymRateCfg;
+    TimingTrackingConfig TimingTrackingCfg;
     ReceiverFreqCorrectorConfig CentralFreqCfg;
+    PhaseTrackingConfig PhaseTrackingCfg;
     ConstellationDisplayConfig ConstellationCfg;
 
 };

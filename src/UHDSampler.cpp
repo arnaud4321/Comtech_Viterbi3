@@ -74,6 +74,9 @@ void UHDSampler::recv_to_buffer(uhd::usrp::multi_usrp::sptr usrp, BufferShort *p
 
     std::vector<short> tmp_buffer(2 * SPB);
     size_t samples_accumulated = 0;
+    uint64_t SamplesInWindow = 0;
+    auto ThroughputWindowStart = std::chrono::steady_clock::now();
+    auto SamplerConsoleWindowStart = std::chrono::steady_clock::now();
 
     while (not StopAll) {
         size_t num_rx_samps =
@@ -85,6 +88,7 @@ void UHDSampler::recv_to_buffer(uhd::usrp::multi_usrp::sptr usrp, BufferShort *p
             continue;
         }
         if ( md.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW ) {
+            overflowCount_.fetch_add(1, std::memory_order_relaxed);
             if ( overflow_message ) {
                 overflow_message = false;
                 std::cerr
@@ -153,6 +157,24 @@ void UHDSampler::recv_to_buffer(uhd::usrp::multi_usrp::sptr usrp, BufferShort *p
             }
             
             samples_accumulated = 0;
+
+            SamplesInWindow += SPB;
+            const auto nowTp = std::chrono::steady_clock::now();
+            const double dtMeas = std::chrono::duration<double>(nowTp - ThroughputWindowStart).count();
+            if (dtMeas >= throughputMeasurePeriodSec_)
+            {
+                const double msps = static_cast<double>(SamplesInWindow) / dtMeas / 1e6;
+                lastThroughputMsps_.store(msps, std::memory_order_relaxed);
+                ThroughputWindowStart = std::chrono::steady_clock::now();
+                SamplesInWindow = 0;
+            }
+            const double dtConsole = std::chrono::duration<double>(nowTp - SamplerConsoleWindowStart).count();
+            if (displayPeriodSec_ > 0.0 && dtConsole >= displayPeriodSec_)
+            {
+                std::cout << "[Sampler] throughput=" << lastThroughputMsps_.load(std::memory_order_relaxed)
+                          << " Msps" << std::endl;
+                SamplerConsoleWindowStart = std::chrono::steady_clock::now();
+            }
         }
     }
 
@@ -166,8 +188,15 @@ void UHDSampler::StartThread()
    
     EttusThread = new std::thread(&UHDSampler::OperateSampler, this, &cSamplerParams);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    //StartOperationRx = std::chrono::system_clock::now();
+    // StartOperationRx = std::chrono::system_clock::now();
 
+    // WARNING: 
+    // When using USRP (Mode 1 or 3), make sure to DISABLE the ENABLE_RAW_PREVITERBI_METRICS 
+    // macro in your build (e.g. do not pass -DENABLE_RAW_PREVITERBI_METRICS to CMake).
+    // This macro enables brute-force cross-correlation in the Receiver which is extremely 
+    // CPU-intensive and will cause the downstream DSP pipeline to choke, leading to 
+    // severe backpressure, UHD overflows, and catastrophic t_rate drop.
+    
     double gain = cSamplerParams.Actualgain;
     double Delta = OperateAGC(&cSamplerParams, gain);
     if ( Delta == -999999 )

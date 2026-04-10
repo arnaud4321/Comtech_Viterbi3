@@ -13,6 +13,20 @@
 #include <thread>
 
 /**
+ * @brief Gardner PI loop and update cadence (JSON section @c TimingTracking).
+ *
+ * @c UpdatePeriodSymbols is the number of output symbols between each @f$\omega@f$ update
+ * (@ref GardnerTiming::Reset @a updatePeriod).
+ */
+struct TimingTrackingConfig
+{
+    double NominalOmega = 2.0;
+    double Kp = 1.0e-3;
+    double Ki = 1.0e-5;
+    int UpdatePeriodSymbols = 64;
+};
+
+/**
  * @brief Thread: 2 sps stream → @ref GardnerTiming → framed 1 sps symbols for PLL and @ref Viterbi.
  *
  * @details Reads @ref BufferFloat from the stage upstream of Gardner (after optional NCO/AGC), pushes

@@ -92,6 +92,44 @@ struct ViterbiParameters
 };
 
 /**
+ * @brief Public structure regrouping all critical statistics and state flags for the Receiver.
+ * 
+ * @details This structure is intended to be exported to external users or wrappers (e.g. Web GUI, Python bindings)
+ * via @ref Receiver::GetRxStatistics(), providing a clean snapshot of the system's performance at a given time.
+ */
+struct RxStatistics {
+    double t_sim;               ///< Wall-clock simulation time elapsed (seconds).
+    double t_rate;              ///< Signal time processed, based on estimated symbol rate (seconds).
+    
+    double samplerMsps;         ///< Sample rate delivered by the USRP sampler (Msps).
+    double rxFilterMsps;        ///< Processing throughput of the matched filter (Msps).
+    uint64_t uhdOverflows;      ///< Number of UHD hardware overflows encountered.
+
+    bool isSymRateLocked;       ///< True if the Symbol Rate Estimator has detected a stable rate.
+    double symRateMsps;         ///< Current estimated symbol rate (Msps).
+    
+    bool isCentralFreqReady;    ///< True if VIVA (coarse frequency) is producing valid offsets.
+    double centralNcoHz;        ///< Current NCO offset applied (Hz).
+    double gainDb;              ///< Current AGC gain applied (dB).
+
+    bool isGardnerLocked;       ///< True if the Gardner timing loop has locked its phase.
+    double gardnerPpm;          ///< Fine residual sampling clock offset estimated by Gardner (ppm).
+
+    bool isPhaseLocked;         ///< True if the Decision-Directed Phase PLL is locked.
+    double phaseFreqHz;         ///< Fine residual frequency offset estimated by the DD-PLL (Hz).
+    
+    bool isViterbiLocked;       ///< True if the Viterbi decoder has synchronized to a hypothesis.
+    bool isPrbsLocked;          ///< True if the descrambled PRBS sequence is locked.
+
+    double evmRms;              ///< Root Mean Square of the Error Vector Magnitude (EVM).
+    double snrFromEvmDb;        ///< Signal-to-Noise Ratio (SNR) in dB estimated directly from the EVM.
+    
+    uint64_t numBits;           ///< Total number of PRBS bits compared.
+    uint64_t numErrors;         ///< Total number of PRBS bit errors.
+    double ber;                 ///< Current Bit Error Rate (BER) over the whole history since lock.
+};
+
+/**
  * @brief End-to-end receive chain and worker threads (includes **Viterbi alignment**: three decoders, four IQ/sign
  * metric probes until lock, then merged output — see **Viterbi manager thread** below).
  *
@@ -108,8 +146,7 @@ struct ViterbiParameters
  * started while Gardner (@ref ReceiverTimingTracking) is locked; re-estimation is similarly gated.
  *
  * A @ref SymbolRateEstimator periodically estimates symbol rate (@f$|r[n]|@f$ → real FFT, peak search near
- * @f$F_s/2@f$); accepted estimates update @ref ReceiverResampler::UpdateFromSymbolRateHz so downstream
- * stages see ~2 samples per symbol at the tracked rate.
+ * @f$F_s/2@f$); accepted estimates update @ref ReceiverResampler::UpdateFromSymbolRateHz.
  *
  * **Frequency / timing / phase:** @ref ReceiverFreqCorrector optionally runs @ref CentralFreqEstimatorViva
  * on blocks of 2-sps data, drives an NCO (@ref FrequencyOffset) and AGC before @ref ReceiverTimingTracking
@@ -138,12 +175,16 @@ private:
     SymbolRateEstimator objSymRateEstimator;
     std::atomic<bool> SymbolRateDetected{false};
     std::atomic<double> SymbolRateEstimateHz{0.0};
+    /// Symboles IQ après phase DD (entrée Viterbi), pour @ref GetTRateRx — jamais remis à zéro par PRBS/Viterbi.
+    std::atomic<uint64_t> rxSymStreamTotal_{0};
     int SymRateWindowBatches = 0;
     int SymRateBatchCounter = 0;
     int SymRateAcceptedCount = 0;
     double SymRateEstimatePeriodSec = 1.0;
     double SymRatePeakToMedianThreshold = 8.0;
     double SymRateMaxRelativeJump = 0.02;
+    bool SymRateAllowRefinement = true;
+    int prbsHighBerStreak_ = 0;
     ReceiverResampler resampler_;
     ReceiverFreqCorrector freqCorrector_;
     ReceiverTimingTracking timingTracking_;
@@ -241,14 +282,17 @@ public:
      * @param RollOff RRC rolloff for receive filter.
      * @param RxModeIn @c PRBS_TX or @c FILE_TX.
      * @param symRateCfg Symbol-rate FFT estimator settings.
+     * @param timingCfg Gardner timing PI (@c NominalOmega, @c Kp, @c Ki, @c UpdatePeriodSymbols).
      * @param displayPeriodSec Console cadence (\>0) or event-only logging (\<=0).
      * @param centralFreqCfg Central-frequency (VIVA + NCO) block; may be default-disabled.
      * @param constellationCfg Optional matplotlib/ascii constellation bridge.
      */
     void StartThreads(double RollOff, TxModes RxModeIn,
                       const SymbolRateEstimatorConfig& symRateCfg = SymbolRateEstimatorConfig{},
+                      const TimingTrackingConfig& timingCfg = TimingTrackingConfig{},
                       double displayPeriodSec = 1.0,
                       const ReceiverFreqCorrectorConfig& centralFreqCfg = ReceiverFreqCorrectorConfig{},
+                      const PhaseTrackingConfig& phaseCfg = PhaseTrackingConfig{},
                       const ConstellationDisplayConfig& constellationCfg = ConstellationDisplayConfig{});
 
     /** @brief Signal shutdown and join worker threads. */
@@ -285,4 +329,24 @@ public:
     }
     uint64_t NumErrorsAll, NumBitsAll;
     double GetPhaseTrackingEvmRms() const { return phaseTrackingDD_.GetLastEvmRms(); }
+
+    /**
+     * @brief Collects and returns a snapshot of all system-level performance metrics.
+     * @param t_sim_optional Externally measured elapsed wall-clock simulation time to inject (if known).
+     * @return Fully populated @ref RxStatistics struct.
+     */
+    RxStatistics GetRxStatistics(double t_sim_optional = 0.0) const;
+
+    /**
+     * @brief Temps « signal » écoulé : symboles reçus (après phase DD) / débit symbole estimé.
+     * @details Utilise @ref SymbolRateEstimateHz dès qu’il est \> 1 Hz, sinon @c SymbolRate nominal.
+     *          Indépendant des lock/désync Viterbi et PRBS (contrairement à @ref NumBitsAll).
+     */
+    double GetTRateRx() const
+    {
+        const uint64_t n = rxSymStreamTotal_.load(std::memory_order_relaxed);
+        const double est = SymbolRateEstimateHz.load(std::memory_order_relaxed);
+        const double denom = (est > 1.0) ? est : SymbolRate;
+        return static_cast<double>(n) / denom;
+    }
 };

@@ -34,8 +34,9 @@ struct ReceiverFreqCorrectorConfig
  * @brief Dedicated thread pulling 2 sps samples, applying NCO + AGC, forwarding to timing recovery.
  *
  * @details **Coarse frequency:** when enabled, accumulates complex samples until
- * @c EstimationBlockSamples, runs @ref CentralFreqEstimatorViva::Run, then low-pass-smooths the offset
- * (@c NcoHzEmaAlpha) and applies @c MaxHzSlewRate before calling @ref FrequencyOffset::SetFrequency on
+ * @c EstimationBlockSamples, runs @ref CentralFreqEstimatorViva::Run, then sets @c targetHz_ to the
+ * raw offset; the NCO then tracks @c targetHz_ with @c NcoHzEmaAlpha and
+ * @c MaxHzSlewRate before calling @ref FrequencyOffset::SetFrequency on
  * the NCO. Until a first valid estimate is available, forwarding may be gated (@c freqReady_).
  *
  * **AGC:** each chunk uses the **sample mean** of @f$I^2+Q^2@f$ (mean instantaneous power over complex

@@ -22,10 +22,10 @@ class FrequencyOffset
 {
 	
 
-	uint64_t Accumulator; //48 bits
+	uint64_t Accumulator = 0; //48 bits
 	uint64_t Mask = 281474976710655;//48 bits; 
-	uint64_t Delta;
-	int64_t DDelta;
+	uint64_t Delta = 0;
+	int64_t DDelta = 0;
 	double LastFreqOffset = -1e10;
 	unsigned int OutputLength, BufferLength;
 	double TimeSample, PhaseFactor,TimeSample2;

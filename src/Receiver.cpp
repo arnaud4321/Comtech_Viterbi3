@@ -107,8 +107,10 @@ Receiver::~Receiver()
 }
 void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
                             const SymbolRateEstimatorConfig& symRateCfg,
+                            const TimingTrackingConfig& timingCfg,
                             double displayPeriodSec,
                             const ReceiverFreqCorrectorConfig& centralFreqCfg,
+                            const PhaseTrackingConfig& phaseCfg,
                             const ConstellationDisplayConfig& constellationCfg)
 {
     StopAll = false;
@@ -158,6 +160,8 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
     }
     SymRatePeakToMedianThreshold = symRateCfg.PeakToMedianThreshold;
     SymRateMaxRelativeJump = symRateCfg.MaxRelativeJump;
+    SymRateAllowRefinement = symRateCfg.AllowRefinement;
+    prbsHighBerStreak_ = 0;
     SymRateEstimatePeriodSec = std::max(0.01, symRateCfg.EstimatePeriodSec);
     objSymRateEstimator.Reset(SamplingFrequency,
                               symRateCfg.FftSize,
@@ -168,20 +172,20 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
     SymRateAcceptedCount = 0;
     SymbolRateDetected.store(false, std::memory_order_relaxed);
     SymbolRateEstimateHz.store(0.0, std::memory_order_relaxed);
+    rxSymStreamTotal_.store(0, std::memory_order_relaxed);
     oBufferResampled.Reset();
     oBufferFreqCorrected.Reset();
     resampler_.Start(&oBufferFilter, &mtxFilterRing, &CvFilterUser,
                      &oBufferResampled, &mtxResampRing, &CvResampData,
                      &CvResampData, &StopAll);
     freqCorrector_.Configure(centralFreqCfg, displayPeriodSec);
-    timingTracking_.ResetGardner(2.0, 1.0e-4, 1.0e-6, 64);
+    timingTracking_.ResetGardner(timingCfg.NominalOmega, timingCfg.Kp, timingCfg.Ki, timingCfg.UpdatePeriodSymbols);
     // Central frequency correction (NCO) between resampler (2 sps) and Gardner.
-    // Config is provided via Params in main (see StartThreads call).
     freqCorrector_.Start(&oBufferResampled, &mtxResampRing, &CvResampData,
                          &oBufferFreqCorrected, &mtxFreqCorrRing, &CvFreqCorrData,
                          &phaseTrackingDD_, &StopAll);
     timingTracking_.Start(&oBufferFreqCorrected, &mtxFreqCorrRing, &CvFreqCorrData, &StopAll, displayPeriodSec);
-    phaseTrackingDD_.Start(&timingTracking_, &StopAll, displayPeriodSec);
+    phaseTrackingDD_.Start(&timingTracking_, &StopAll, displayPeriodSec, &SymbolRateEstimateHz, phaseCfg);
 
     FilterThread = std::thread(&Receiver::OperateFilter, this);
     ViterbiManagerThread = std::thread(&Receiver::OperateViterbiManager, this);
@@ -218,7 +222,7 @@ void Receiver::StopThreads(void)
     phaseTrackingDD_.StopJoin();
     std::cout << "[Receiver::StopThreads] Closing constellation display..." << std::endl;
     if (constellationDisplay_)
-        constellationDisplay_->ClosePipeKeepAlive();
+        constellationDisplay_->Stop();
     constellationDisplay_.reset();
     std::cout << "[Receiver::StopThreads] Notifying Viterbi managers..." << std::endl;
     for(int i = 0; i < 3;i++)
@@ -352,6 +356,10 @@ void Receiver::OperateFilter(void)
             {
                 if (est.Detected)
                 {
+                    if (!SymRateAllowRefinement) {
+                        // In loopback/simulation, force exact nominal rate to prevent resampling drift.
+                        est.SymbolRateHz = SymbolRate;
+                    }
                     SymbolRateEstimateHz.store(est.SymbolRateHz, std::memory_order_relaxed);
                     SymbolRateDetected.store(true, std::memory_order_relaxed);
                     SymRateAcceptedCount = 1;
@@ -401,7 +409,7 @@ void Receiver::OperateFilter(void)
                     symrate_collecting = false;
                     SymRateBatchCounter = 0;
                 }
-                else
+                else if (SymRateAllowRefinement)
                 {
                     const double prev = SymbolRateEstimateHz.load(std::memory_order_relaxed);
                     const double rel = std::abs(est.SymbolRateHz - prev) / std::max(1.0, prev);
@@ -497,8 +505,8 @@ void Receiver::OperateFilter(void)
                 std::chrono::duration<double>(now_tp - rx_filter_console_window_start).count();
             if (displayPeriodSec_ > 0.0 && dtConsole >= displayPeriodSec_)
             {
-                // std::cout << "[RXFilter] throughput=" << lastRxFilterThroughputMsps_.load(std::memory_order_relaxed)
-                //           << " Msps" << std::endl;
+                std::cout << "[RXFilter] throughput=" << lastRxFilterThroughputMsps_.load(std::memory_order_relaxed)
+                          << " Msps" << std::endl;
                 rx_filter_console_window_start = std::chrono::steady_clock::now();
             }
 
@@ -643,6 +651,7 @@ void Receiver::OperateViterbiManager(void)
         if (!phaseTrackingDD_.WaitPopSymbolFrame(pendingI, pendingQ, kSymFrame))
             break;
         symbols_total += static_cast<uint64_t>(kSymFrame);
+        rxSymStreamTotal_.fetch_add(static_cast<uint64_t>(kSymFrame), std::memory_order_relaxed);
 
         // RAW (pre-Viterbi) diagnostics (optional).
         // Compile-time options:
@@ -1026,7 +1035,9 @@ skip_raw:;
             const auto now = std::chrono::steady_clock::now();
             if (now - lastConstellationDisplay >= std::chrono::duration<double>(constellationCfg_.PeriodSec))
             {
-                const double t_rate = static_cast<double>(symbols_total) / SymbolRate;
+                const double symRateEstHz = SymbolRateEstimateHz.load(std::memory_order_relaxed);
+                const double rsDenom = (symRateEstHz > 1.0) ? symRateEstHz : SymbolRate;
+                const double t_rate = static_cast<double>(symbols_total) / rsDenom;
                 const double t_sim = std::chrono::duration<double>(now - wall_start).count();
                 // Extra status overlay for the constellation window (space-separated key=value).
                 // Keep it short to avoid slowing down the pipe/GUI.
@@ -1063,6 +1074,7 @@ skip_raw:;
                 const double ber = (numBits > 0ULL) ? (static_cast<double>(numErrors) / static_cast<double>(numBits)) : 0.0;
 
                 const double samplerMsps = pSampler ? pSampler->GetLastThroughputMsps() : 0.0;
+                const uint64_t uhdOvf = pSampler ? pSampler->GetOverflowCount() : 0;
                 const double rxFilterMsps = lastRxFilterThroughputMsps_.load(std::memory_order_relaxed);
 
                 // Channel applied values (if available).
@@ -1091,14 +1103,14 @@ skip_raw:;
                               "symRateMsps=%.6f symRatePpm=%.3f gardLocked=%d phaseLocked=%d vitLocked=%d prbsLocked=%d "
                               "symRateCorrPpm=%.3f gardnerPpm=%.3f rxTotalPpmCorr=%.3f "
                               "numBits=%llu numErrors=%llu ber=%.6e "
-                              "samplerMsps=%.3f rxFilterMsps=%.3f "
+                              "samplerMsps=%.3f rxFilterMsps=%.3f uhdOverflows=%llu "
                               "centralReady=%d centralTargetHz=%.3f centralNcoHz=%.3f gainDb=%.3f phaseFreqHz=%.3f "
                               "chanFreqHz=%.3f chanTotalPpm=%.6f chanGainDb=%.3f chanSeg=%d chanTRate=%.3f "
                               "chanSnrDb=%.2f evmRms=%.6f snrFromEvmDb=%.2f",
                               symRateMsps, symRatePpm, gardLocked, phaseLocked, vitLocked, prbsLocked,
                               symRateCorrPpm, gardnerPpm, rxTotalPpmCorr,
                               numBits, numErrors, ber,
-                              samplerMsps, rxFilterMsps,
+                              samplerMsps, rxFilterMsps, (unsigned long long)uhdOvf,
                               centralReady, centralTargetHz, centralNcoHz, gainDb, phaseFreqHz,
                               chanFreqHz, chanTotalPpm, chanGainDb, chanSeg, chanTRate, chanSnrDb, evmRms,
                               snrFromEvmDb);
@@ -1333,6 +1345,7 @@ skip_raw:;
                     {
                         ViterbiSynchronized = false;
                         PRBSSynchronized = false;
+                        prbsHighBerStreak_ = 0;
                         NumBitsAll = 0;
                         NumErrorsAll = 0;
                         
@@ -1395,17 +1408,21 @@ skip_raw:;
                             // When PRBSInjectStride > 0, PRBS sync should fail (stay unlocked).
                             InjectPRBSErrorDeterministic(OutputAll + PtrRdOut, BatchSize3);
                             PRBSSynchronized = SyncPRBS(OutputAll+PtrRdOut, PtrStart, PRBSSeed, NumErrorsAtLock);
-                            if (displayPeriodSec_ > 0.0)
+                            if (PRBSSynchronized)
                             {
-                                std::cout << "[PRBS] \033[32mLOCKED\033[0m"
-                                          << " NumErrors=" << NumErrorsAtLock
-                                          << " thresh=" << PRBSThreshold
-                                          << " PtrStart=" << PtrStart
-                                          << " Seed=" << PRBSSeed
-                                          << std::endl;
+                                prbsHighBerStreak_ = 0;
+                                if (displayPeriodSec_ > 0.0)
+                                {
+                                    std::cout << "[PRBS] \033[32mLOCKED\033[0m"
+                                              << " NumErrors=" << NumErrorsAtLock
+                                              << " thresh=" << PRBSThreshold
+                                              << " PtrStart=" << PtrStart
+                                              << " Seed=" << PRBSSeed
+                                              << std::endl;
+                                }
+                                oPrbs.CreateOutputs(PRBSSeed, BatchSize3 - PtrStart, PrbsOut);
+                                CountErrors(OutputAll+PtrRdOut+PtrStart, PrbsOut, BatchSize3-PtrStart);
                             }
-                            oPrbs.CreateOutputs(PRBSSeed, BatchSize3 - PtrStart, PrbsOut);
-                            CountErrors(OutputAll+PtrRdOut+PtrStart, PrbsOut, BatchSize3-PtrStart);
                         }
                         else {
                             oPrbs.CreateOutputs(PRBSSeed, BatchSize3, PrbsOut);
@@ -1414,11 +1431,41 @@ skip_raw:;
                             CountErrors(OutputAll+PtrRdOut, PrbsOut, BatchSize3);
                             uint64_t diffErrors = NumErrorsAll - prevErrors;
                             uint64_t diffBits = NumBitsAll - prevBits;
-                            if (diffBits > 0 && (static_cast<double>(diffErrors) / static_cast<double>(diffBits)) > 0.3) {
-                                if (displayPeriodSec_ > 0.0 && PRBSSynchronized) {
-                                    std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER detected (" << diffErrors << "/" << diffBits << ")" << std::endl;
+                            
+                            // Debug mismatch
+                            if (diffBits > 0 && (static_cast<double>(diffErrors) / diffBits) > 0.3) {
+                                std::cout << "[DEBUG] PRBS Mismatch! diffErrors=" << diffErrors << "/" << diffBits << std::endl;
+                                std::cout << "[DEBUG] OutputAll: ";
+                                for(int k=0; k<16; k++) std::cout << (int)(OutputAll[PtrRdOut + k] & 1);
+                                std::cout << std::endl << "[DEBUG] PrbsOut  : ";
+                                for(int k=0; k<16; k++) std::cout << (int)(PrbsOut[k] & 1);
+                                std::cout << std::endl;
+                            }
+
+                            // One noisy batch (fading, brief timing slip) used to force DESYNC and re-acquire PRBS,
+                            // causing a "décrochage" loop. Require several consecutive bad batches.
+                            constexpr int kPrbsDesyncBadBatches = 3;
+                            constexpr double kPrbsDesyncBerThreshold = 0.3;
+                            if (diffBits > 0)
+                            {
+                                const double berBatch =
+                                    static_cast<double>(diffErrors) / static_cast<double>(diffBits);
+                                if (berBatch > kPrbsDesyncBerThreshold)
+                                {
+                                    prbsHighBerStreak_++;
+                                    if (PRBSSynchronized && prbsHighBerStreak_ >= kPrbsDesyncBadBatches)
+                                    {
+                                        if (displayPeriodSec_ > 0.0) {
+                                            std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER sustained "
+                                                      << kPrbsDesyncBadBatches << " batches (last "
+                                                      << diffErrors << "/" << diffBits << ")" << std::endl;
+                                        }
+                                        PRBSSynchronized = false;
+                                        prbsHighBerStreak_ = 0;
+                                    }
                                 }
-                                PRBSSynchronized = false;
+                                else
+                                    prbsHighBerStreak_ = 0;
                             }
                         }
                         OutputQ.AdvanceRead();
@@ -1535,6 +1582,45 @@ static void InjectPRBSErrorDeterministic(unsigned char* buf, int length)
             buf[i] ^= 1;
     }
 }
+RxStatistics Receiver::GetRxStatistics(double t_sim_optional) const
+{
+    RxStatistics s{};
+    
+    s.t_sim = t_sim_optional;
+    s.t_rate = GetTRateRx();
+    
+    s.samplerMsps = pSampler ? pSampler->GetLastThroughputMsps() : 0.0;
+    s.rxFilterMsps = lastRxFilterThroughputMsps_.load(std::memory_order_relaxed);
+    s.uhdOverflows = pSampler ? pSampler->GetOverflowCount() : 0;
+
+    s.isSymRateLocked = SymbolRateDetected.load(std::memory_order_relaxed);
+    s.symRateMsps = SymbolRateEstimateHz.load(std::memory_order_relaxed) / 1e6;
+
+    s.isCentralFreqReady = freqCorrector_.IsFreqReady();
+    s.centralNcoHz = freqCorrector_.GetNcoHz();
+    s.gainDb = freqCorrector_.GetGainDb();
+
+    s.isGardnerLocked = timingTracking_.IsLocked();
+    const double omega = timingTracking_.GetGardnerOmega();
+    const double omegaNom = timingTracking_.GetGardnerOmegaNom();
+    s.gardnerPpm = (omega > 1e-20 && omegaNom > 1e-20) ? ((omegaNom / omega) - 1.0) * 1.0e6 : 0.0;
+
+    s.isPhaseLocked = phaseTrackingDD_.IsLocked();
+    s.phaseFreqHz = phaseTrackingDD_.GetLastFreqEstHz();
+
+    s.isViterbiLocked = ViterbiSynchronized;
+    s.isPrbsLocked = PRBSSynchronized;
+
+    s.evmRms = phaseTrackingDD_.GetLastEvmRms();
+    s.snrFromEvmDb = (s.evmRms > 1e-12) ? (-20.0 * std::log10(s.evmRms)) : std::numeric_limits<double>::quiet_NaN();
+
+    s.numBits = NumBitsAll;
+    s.numErrors = NumErrorsAll;
+    s.ber = (s.numBits > 0) ? (static_cast<double>(s.numErrors) / static_cast<double>(s.numBits)) : 0.0;
+
+    return s;
+}
+
 bool Receiver::SyncPRBS(unsigned char *In, int &PtrStart,unsigned int &Seed, int& NumErrorsAtLock)
 {
     bool Success = false;

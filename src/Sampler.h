@@ -39,14 +39,14 @@ private:
     
     bool Debug;
     double TimeBatch;
+protected:
     double displayPeriodSec_ = 1.0;
     /// Wall-time window for lastThroughputMsps_ (constellation overlay); console line uses displayPeriodSec_ when >0.
     double throughputMeasurePeriodSec_ = 1.0;
+    std::atomic<double> lastThroughputMsps_{0.0};
     thread SamplingThread;
     AWGNChannel *pChannel;
     void OperateSampler(void);
-    std::atomic<double> lastThroughputMsps_{0.0};
-protected:
     std::atomic<bool> StopAll{false};
     BufferShort oBuffer;
     std::mutex mtxSamplerBuffer_;
@@ -86,5 +86,8 @@ public:
 
     /** @brief Last measured complex-Msps over the window set by @ref SetThroughputMeasurePeriodSec. */
     double GetLastThroughputMsps() const { return lastThroughputMsps_.load(std::memory_order_relaxed); }
+
+    /** @brief Number of UHD overflow events since start. Base always returns 0; overridden in UHDSampler. */
+    virtual uint64_t GetOverflowCount() const { return 0; }
 };
 

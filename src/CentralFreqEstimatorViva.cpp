@@ -52,12 +52,22 @@ CentralFreqVivaResult CentralFreqEstimatorViva::Run(const float* inI, const floa
         return out;
 
     // Build VIVA sequence: v = |r|^2 * exp(j*4*angle(r)), normalized by AvgPower for stability.
+    // First, remove DC offset (LO leakage) to avoid false peak at k=0.
+    double sumI = 0.0, sumQ = 0.0;
+    for (int n = 0; n < nIn; ++n)
+    {
+        sumI += inI[n];
+        sumQ += inQ[n];
+    }
+    const float meanI = static_cast<float>(sumI / nIn);
+    const float meanQ = static_cast<float>(sumQ / nIn);
+
     const float eps = 1e-12f;
     double sumP = 0.0;
     for (int n = 0; n < nIn; ++n)
     {
-        const float i = inI[n];
-        const float q = inQ[n];
+        const float i = inI[n] - meanI;
+        const float q = inQ[n] - meanQ;
         const float p = i * i + q * q;
         sumP += static_cast<double>(p);
     }
@@ -70,8 +80,8 @@ CentralFreqVivaResult CentralFreqEstimatorViva::Run(const float* inI, const floa
         float re = 0.0f, im = 0.0f;
         if (n < nIn)
         {
-            const float i = inI[n];
-            const float q = inQ[n];
+            const float i = inI[n] - meanI;
+            const float q = inQ[n] - meanQ;
             const float p = i * i + q * q;
             const float theta = std::atan2(q, i);
             const float phase = 4.0f * theta;
@@ -93,14 +103,14 @@ CentralFreqVivaResult CentralFreqEstimatorViva::Run(const float* inI, const floa
     if (kMax < 2)
         return out;
 
-    // Search peak around DC (exclude k=0) in +/-kMax.
+    // Search peak around DC (including k=0) in +/-kMax.
     float bestM = -1.0f;
-    int bestK = 1;
+    int bestK = 0;
     std::vector<float> mags;
-    mags.reserve(static_cast<size_t>(2 * kMax));
+    mags.reserve(static_cast<size_t>(2 * kMax + 1));
 
     const Ipp32fc* Y = fftOut_.data();
-    for (int k = 1; k <= kMax; ++k)
+    for (int k = 0; k <= kMax; ++k)
     {
         const float reP = Y[k].re;
         const float imP = Y[k].im;
@@ -112,15 +122,18 @@ CentralFreqVivaResult CentralFreqEstimatorViva::Run(const float* inI, const floa
             bestK = k;
         }
 
-        const int kn = nFft_ - k;
-        const float reN = Y[kn].re;
-        const float imN = Y[kn].im;
-        const float mN = reN * reN + imN * imN;
-        mags.push_back(mN);
-        if (mN > bestM)
+        if (k > 0)
         {
-            bestM = mN;
-            bestK = -k;
+            const int kn = nFft_ - k;
+            const float reN = Y[kn].re;
+            const float imN = Y[kn].im;
+            const float mN = reN * reN + imN * imN;
+            mags.push_back(mN);
+            if (mN > bestM)
+            {
+                bestM = mN;
+                bestK = -k;
+            }
         }
     }
 

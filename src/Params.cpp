@@ -18,15 +18,24 @@ void Params::ReadParams(string FileName)
 	json j;
 	i >> j;
 
+    const json opLegacy = j.value("Operation", json::object());
+    const json recv = j.value("Receiver", json::object());
+    const json sim = j.value("Simulation", json::object());
+
     unsigned int Tmp;
-    Tmp = j["Transmitter"]["Method"];
+    const json& tx = j.at("Transmitter");
+    Tmp = tx["Method"];
     if(Tmp == 0)
         TxMode = PRBS_TX;
     else
         TxMode = FILE_TX;
-    RollOff = j["Transmitter"]["RollOff"];
+    RollOff = tx["RollOff"];
 
-    TxFileName = j["Transmitter"]["FileName"];
+    TxFileName = tx["FileName"];
+    TxFreq = tx.value("FreqHz", opLegacy.value("TxFreq", 2000e6));
+    TxGaindb = tx.value("GainDb", opLegacy.value("TxGaindb", 20.0));
+    TxSampleRate = tx.value("SampleRate", opLegacy.value("TxSampleRate", 21.42e6));
+
 	EsN0 = j["Channel"]["Esn0"];
     // Channel gain profile (dB). Backward-compatible with older key InitialRangeDb.
     InitialGainDb = j["Channel"].value("InitialGainDb", j["Channel"].value("InitialRangeDb", 0.0));
@@ -51,30 +60,18 @@ void Params::ReadParams(string FileName)
     else
         SimMode = CONT_SIM;
 
-    if (j.contains("Operation")) {
-        Tmp = j["Operation"].value("Mode", 0);
-        switch(Tmp) {
-            case 0: OpMode = NOT_OP; break;
-            case 1: OpMode = TX_ONLY; break;
-            case 2: OpMode = RX_ONLY; break;
-            case 3: OpMode = TX_RX; break;
-            default: OpMode = NOT_OP; break;
-        }
-        RxFreq = j["Operation"].value("RxFreq", 2000e6);
-        TxFreq = j["Operation"].value("TxFreq", 2000e6);
-        TxGaindb = j["Operation"].value("TxGaindb", 20.0);
-        RxSampleRate = j["Operation"].value("RxSampleRate", 21.42e6);
-        TxSampleRate = j["Operation"].value("TxSampleRate", 21.42e6);
-        ref = j["Operation"].value("ref", "internal");
-    } else {
-        OpMode = NOT_OP;
-        RxFreq = 2000e6;
-        TxFreq = 2000e6;
-        TxGaindb = 20.0;
-        RxSampleRate = 21.42e6;
-        TxSampleRate = 21.42e6;
-        ref = "internal";
+    // Prefer Operation.Mode / ref; fallback Simulation.OperationMode / ClockReference for older JSON.
+    Tmp = opLegacy.value("Mode", sim.value("OperationMode", 0));
+    switch (Tmp) {
+        case 0: OpMode = NOT_OP; break;
+        case 1: OpMode = TX_ONLY; break;
+        case 2: OpMode = RX_ONLY; break;
+        case 3: OpMode = TX_RX; break;
+        default: OpMode = NOT_OP; break;
     }
+    RxFreq = recv.value("FreqHz", opLegacy.value("RxFreq", 2000e6));
+    RxSampleRate = recv.value("SampleRate", opLegacy.value("RxSampleRate", 21.42e6));
+    ref = opLegacy.value("ref", sim.value("ClockReference", std::string("internal")));
 
     SamplingFrequency = RxSampleRate;
     SymbolRate = SamplingFrequency / 2.0;
@@ -97,9 +94,41 @@ void Params::ReadParams(string FileName)
     DisplayPeriodSec = j["Simulation"].value("DisplayPeriodSec", 1.0);
     // > 0: periodic status interval (s). <= 0: no periodic logs; lock/unlock (and similar) events only.
 
-    if (j.contains("CentralFrequency"))
+    const json* tTiming = nullptr;
+    if (recv.contains("TimingTracking"))
+        tTiming = &recv["TimingTracking"];
+    else if (j.contains("TimingTracking"))
+        tTiming = &j["TimingTracking"];
+    if (tTiming != nullptr)
     {
-        const auto& c = j["CentralFrequency"];
+        const auto& t = *tTiming;
+        TimingTrackingCfg.NominalOmega = t.value("NominalOmega", TimingTrackingCfg.NominalOmega);
+        TimingTrackingCfg.Kp = t.value("Kp", TimingTrackingCfg.Kp);
+        TimingTrackingCfg.Ki = t.value("Ki", TimingTrackingCfg.Ki);
+        int upd = t.value("UpdatePeriodSymbols", TimingTrackingCfg.UpdatePeriodSymbols);
+        TimingTrackingCfg.UpdatePeriodSymbols = (upd < 1) ? 1 : upd;
+    }
+
+    const json* pPhase = nullptr;
+    if (recv.contains("PhaseTracking"))
+        pPhase = &recv["PhaseTracking"];
+    else if (j.contains("PhaseTracking"))
+        pPhase = &j["PhaseTracking"];
+    if (pPhase != nullptr)
+    {
+        const auto& p = *pPhase;
+        PhaseTrackingCfg.Kp = p.value("Kp", PhaseTrackingCfg.Kp);
+        PhaseTrackingCfg.Ki = p.value("Ki", PhaseTrackingCfg.Ki);
+    }
+
+    const json* cCentral = nullptr;
+    if (recv.contains("CentralFrequency"))
+        cCentral = &recv["CentralFrequency"];
+    else if (j.contains("CentralFrequency"))
+        cCentral = &j["CentralFrequency"];
+    if (cCentral != nullptr)
+    {
+        const auto& c = *cCentral;
         CentralFreqCfg.Enable = c.value("Enable", 1) != 0;
         CentralFreqCfg.EstimationBlockSamples = c.value("EstimationBlockSamples", 65536);
         CentralFreqCfg.EstimatePeriodSec = c.value("EstimatePeriodSec", 1.0);
@@ -112,19 +141,35 @@ void Params::ReadParams(string FileName)
         CentralFreqCfg.TargetAvgPower = c.value("TargetAvgPower", -1.0);
     }
 
-    if (j.contains("SymbolRateEstimator"))
+    const json* sSym = nullptr;
+    if (recv.contains("SymbolRateEstimator"))
+        sSym = &recv["SymbolRateEstimator"];
+    else if (j.contains("SymbolRateEstimator"))
+        sSym = &j["SymbolRateEstimator"];
+    if (sSym != nullptr)
     {
-        const auto& s = j["SymbolRateEstimator"];
+        const auto& s = *sSym;
         if (s.contains("FftSize")) SymRateCfg.FftSize = s["FftSize"];
         if (s.contains("MaxOffsetHz")) SymRateCfg.MaxOffsetHz = s["MaxOffsetHz"];
         if (s.contains("EstimatePeriodSec")) SymRateCfg.EstimatePeriodSec = s["EstimatePeriodSec"];
         if (s.contains("PeakToMedianThreshold")) SymRateCfg.PeakToMedianThreshold = s["PeakToMedianThreshold"];
         if (s.contains("MaxRelativeJump")) SymRateCfg.MaxRelativeJump = s["MaxRelativeJump"];
+        if (s.contains("AllowRefinement")) SymRateCfg.AllowRefinement = s["AllowRefinement"].get<bool>();
+
+        // Force refinement OFF if we are in loopback modes or simulation where TX/RX clocks are identical.
+        if (OpMode == FILE_TX || OpMode == TX_RX) {
+            SymRateCfg.AllowRefinement = false;
+        }
     }
 
-    if (j.contains("ConstellationDisplay"))
+    const json* cConst = nullptr;
+    if (recv.contains("ConstellationDisplay"))
+        cConst = &recv["ConstellationDisplay"];
+    else if (j.contains("ConstellationDisplay"))
+        cConst = &j["ConstellationDisplay"];
+    if (cConst != nullptr)
     {
-        const auto& c = j["ConstellationDisplay"];
+        const auto& c = *cConst;
         ConstellationCfg.PeriodSec = c.value("PeriodSec", 0.0);
         ConstellationCfg.DrawPeriodSec = c.value("DrawPeriodSec", 0.0);
         ConstellationCfg.NumSymbols = c.value("NumSymbols", 2048);

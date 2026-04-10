@@ -38,8 +38,10 @@ public:
 
     /// Start the phase-tracking thread.
     /// Input is pulled from timingTracking (WaitPopSymbolFrame).
+    /// @param estSymbolRateHz if non-null, @c t_rate logs use this estimate (Hz) with fallback to nominal @c SymbolRate.
     void Start(ReceiverTimingTracking* timingTracking, std::atomic<bool>* stopAll,
-               double displayPeriodSec = 1.0);
+               double displayPeriodSec = 1.0, std::atomic<double>* estSymbolRateHz = nullptr,
+               const PhaseTrackingConfig& config = PhaseTrackingConfig{});
 
     void StopJoin();
 
@@ -73,14 +75,15 @@ private:
 
     ReceiverTimingTracking* timingTracking_ = nullptr;
     std::atomic<bool>* stopAll_ = nullptr;
+    std::atomic<double>* estSymbolRateHz_ = nullptr;
 
     // 2nd-order PLL state (radians, radians/sample)
     float phaseRad_ = 0.0f;
     float freqRadPerSym_ = 0.0f;
 
     // Loop gains (tune empirically)
-    float kp_ = 0.02f;
-    float ki_ = 1.0e-5f;
+    float kp_ = 0.01f;
+    float ki_ = 5.0e-6f;
 
     // Lock detection (based on smoothed |error|)
     float errEma_ = 0.0f;

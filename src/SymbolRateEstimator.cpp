@@ -5,7 +5,7 @@
  * @details **PushBatch** — Append batches until @c Fill == @c Nfft.
  * **RunEstimation** — Optionally interpolate to @c NfftOs (@c InterpLagrange4, @c OsFactor). Build FFT input
  * @f$\Re = |r[n]|@f$, @f$\Im = 0@f$. Intel IPP @c ippsDFTFwd_CToC_32fc; collect @f$|X[k]|^2@f$ for @f$k@f$ near @f$k_0@f$
- * (code: @c f0Hz = 0.5*FsHz mapped through @c fsUsed / @c nFftUsed). Skip central bin @f$k_0@f$ when picking @c bestK;
+ * (code: @c f0Hz = 0.5*FsHz mapped through @c fsUsed / @c nFftUsed). Peak bin ties toward @f$k_0@f$ (nominal line near @f$F_s/2@f$);
  * parabola on @f$y_L,y_C,y_R@f$ → @c SymbolRateHz. Reset @c Fill when done. Acceptance logic lives in @ref Receiver.
  */
 
@@ -184,10 +184,10 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
 
     std::vector<float> mags;
     mags.reserve(2 * kMax + 1);
+    std::vector<int> idxs;
+    idxs.reserve(2 * kMax + 1);
     const double f0Hz = 0.5 * FsHz;
     const int k0 = std::max(0, std::min(nFftUsed - 1, static_cast<int>(std::llround(f0Hz * nFftUsed / fsUsed))));
-    int bestK = k0;
-    float bestM = -1.0f;
     for (int k = (k0 - kMax); k <= (k0 + kMax); ++k)
     {
         const int idx = (k >= 0 && k < nFftUsed) ? k : ((k % nFftUsed + nFftUsed) % nFftUsed);
@@ -195,10 +195,48 @@ SymbolRateEstimateResult SymbolRateEstimator::RunEstimation()
         const float im = fftOutPtr[idx].im;
         const float m = re * re + im * im;
         mags.push_back(m);
-        if (idx != k0 && m > bestM)
+        idxs.push_back(idx);
+    }
+
+    float maxM = 0.0f;
+    for (float m : mags)
+        maxM = std::max(maxM, m);
+
+    auto circBinDist = [nFftUsed](int a, int b) {
+        const int d = std::abs(a - b);
+        return std::min(d, nFftUsed - d);
+    };
+
+    // Among bins within kMagTieRatio of the band maximum, prefer the one closest to k0 (nominal baud line near Fs/2
+    // at 2 Sps), then the strongest — reduces wrong Rs when a sidelobe is slightly higher than the true line.
+    constexpr float kMagTieRatio = 0.92f;
+    const float mFloor = maxM * kMagTieRatio;
+    int bestK = k0;
+    float bestM = -1.0f;
+    int bestD = nFftUsed + 1;
+    for (size_t i = 0; i < mags.size(); ++i)
+    {
+        const float mi = mags[i];
+        const int idx = idxs[i];
+        if (mi < mFloor)
+            continue;
+        const int d = circBinDist(idx, k0);
+        if (d < bestD || (d == bestD && mi > bestM))
         {
-            bestM = m;
+            bestD = d;
+            bestM = mi;
             bestK = idx;
+        }
+    }
+    if (bestM < 0.0f)
+    {
+        for (size_t i = 0; i < mags.size(); ++i)
+        {
+            if (mags[i] > bestM)
+            {
+                bestM = mags[i];
+                bestK = idxs[i];
+            }
         }
     }
 

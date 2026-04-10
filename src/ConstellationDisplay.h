@@ -103,8 +103,8 @@ struct ConstellationDisplayConfig
  *
  * @details **Protocol (stdin of child):** a @c FRAME line with key=value fields (tags, rates, lock flags,
  * channel snapshot, etc.), followed by interleaved ASCII or raw float IQ samples depending on mode, then an
- * @c END line. The child script (see @ref ConstellationDisplayConfig::PythonScript) parses frames and
- * updates scatter plots. No DSP here—only serialization of receiver/channel state for visualization.
+ * @c END line; @c QUIT asks the child to close. On shutdown, @ref Stop sends @c QUIT and reaps the process.
+ * The child script parses frames and updates plots. No DSP here—only serialization for visualization.
  */
 class ConstellationDisplay
 {
@@ -182,6 +182,11 @@ public:
             if (!cfg_.XDisplay.empty())
                 setenv("DISPLAY", cfg_.XDisplay.c_str(), 1);
 
+            // Ctrl+C / SIGTERM in the terminal go to the foreground group; ignore here so only the
+            // parent handles shutdown and sends QUIT — matplotlib closes cleanly instead of a race.
+            signal(SIGINT, SIG_IGN);
+            signal(SIGTERM, SIG_IGN);
+
             // exec: python -u script
             const char* argv0 = cfg_.PythonExe.c_str();
             const char* argv1 = "-u";
@@ -237,19 +242,6 @@ public:
         }
     }
 
-    // Close the pipe without sending QUIT and without waiting/killing the child.
-    // This lets the GUI keep running after normal end-of-simulation (EOF on stdin).
-    void ClosePipeKeepAlive()
-    {
-        if (fdWrite_ >= 0)
-        {
-            close(fdWrite_);
-            fdWrite_ = -1;
-        }
-        // Detach: do not reap/kill in destructor.
-        childPid_ = -1;
-    }
-
     /** @brief Send one constellation frame without extra key=value overlay text. */
     void Update(const float* i, const float* q, int n, double t_sim, double t_rate)
     {
@@ -262,7 +254,7 @@ public:
      * @param q Quadrature samples (at least @a n).
      * @param n Number of complex samples offered (capped by config @c NumSymbols).
      * @param t_sim Wall time since start (seconds), printed on the FRAME line.
-     * @param t_rate Time-axis in samples at nominal rate (seconds), printed on the FRAME line.
+     * @param t_rate Temps signal (s): symboles après phase DD / débit estimé (@c SymbolRateEstimateHz) ou nominal.
      * @param extraKvs Space-separated @c key=value tokens appended to the FRAME header (may be empty).
      */
     void UpdateEx(const float* i, const float* q, int n, double t_sim, double t_rate, const std::string& extraKvs)

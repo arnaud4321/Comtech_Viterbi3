@@ -32,24 +32,24 @@ void TransmitterManager::OperateThread()
     md.start_of_burst = true;
     md.end_of_burst   = false;
 
-    alignas(32) float floatsOut[SPB*2];
-    alignas(32) short ChOut[SPB*2];
+    alignas(32) float floatsOut[TxOutputBatchSize];
+    alignas(32) short ChOut[TxOutputBatchSize];
 
     bool first = true;
 
     while(!StopAll)
     {
-        if(!pTx->CopyOutputSamples(floatsOut, SPB*2, StopAll))
+        if(!pTx->CopyOutputSamples(floatsOut, TxOutputBatchSize, StopAll))
             break;
 
-        for(int i = 0; i < SPB*2; i++) {
+        for(int i = 0; i < TxOutputBatchSize; i++) {
             float v = floatsOut[i] * 8192.0f; // Scale appropriately, avoids clipping.
             if (v > 32767.0f) v = 32767.0f;
             if (v < -32768.0f) v = -32768.0f;
             ChOut[i] = (short)v;
         }
         
-        int ns = tx_stream->send(ChOut, SPB, md, 0.1);
+        int ns = tx_stream->send(ChOut, TxOutputBatchSize/2, md, 0.1);
         NumBatches++;
 
         if (first) {

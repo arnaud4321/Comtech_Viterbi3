@@ -108,6 +108,12 @@ The configuration file is read by `Params::ReadParams` and defines:
   - `EstimatePeriodSec`: how often the RX filter thread attempts a new estimate (seconds).
   - `PeakToMedianThreshold`: detection threshold (peak/median).
   - `MaxRelativeJump`: max allowed relative jump vs previous estimate (gates re-estimates).
+- **TimingTracking** (Gardner timing recovery)
+  - `NominalOmega`: Nominal samples per symbol.
+  - `Kp`, `Ki`: PI loop gains.
+  - `UpdatePeriodSymbols`: How often to update the timing offset.
+- **PhaseTracking** (Decision-directed carrier phase tracking)
+  - `Kp`, `Ki`: PLL loop gains for phase and frequency tracking.
 - **ConstellationDisplay** (optional UI / live plots)
   - `PeriodSec`: how often the receiver sends a FRAME to the UI; set to 0 or negative to disable.
   - `DrawPeriodSec`: GUI redraw throttle (seconds). Independent from `PeriodSec`.
