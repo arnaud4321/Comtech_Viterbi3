@@ -14,9 +14,11 @@ in the generated HTML, or follow the references below.
 ### Chain (index of main blocks)
 
 - @ref Transmitter
+- @ref TransmitterManager (optional USRP streaming)
 - @ref AWGNChannel
 - @ref ChannelSamplingClockOffset (optional sampling-clock offset in the channel)
-- @ref Sampler
+- @ref USRPInit (optional USRP setup)
+- @ref Sampler (base) / @ref UHDSampler (USRP streaming)
 - @ref Receiver (orchestrates the blocks below)
 - @ref SymbolRateEstimator
 - @ref ReceiverResampler and @ref Resampler
@@ -73,7 +75,9 @@ Class and file reference is generated from Doxygen comments in `src/*.h` and `sr
 
 The simulation is controlled via a JSON configuration file (e.g. `src/config.json`) read by `Params::ReadParams`. The configuration encompasses several major sections:
 
-- **Transmitter**: defines the data source (`Method`: PRBS or File) and RRC `RollOff`.
+- **Operation**: top-level operating mode (e.g. `Mode` 3 for TX_RX) and USRP clock reference (`ref`).
+- **Transmitter**: defines the data source (`Method`: PRBS or File), RRC `RollOff`, RF `FreqHz`, `GainDb`, and hardware `SampleRate`.
+- **Receiver**: defines RF `FreqHz`, hardware `SampleRate`, and wraps the DSP blocks below.
 - **Channel**: controls the AWGN and impairments:
   - `Esn0`: Base Es/N0 in dB.
   - `ApplyGainBeforeNoise`: whether to apply the channel gain directly to the signal (varying the SNR) or to signal+noise.

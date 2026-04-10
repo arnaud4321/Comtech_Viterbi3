@@ -6,9 +6,9 @@ Multithreaded C++ simulation of a QPSK-oriented transmit/receive chain with Vite
 
 The simulation runs an end-to-end pipeline:
 
-- **TX**: PRBS/file source → scrambling → 3 parallel branches (alignment hypotheses) → convolutional coding → pulse shaping
+- **TX**: PRBS/file source → scrambling → 3 parallel branches (alignment hypotheses) → convolutional coding → pulse shaping (→ optional USRP TX streaming)
 - **Channel**: AWGN + time-varying impairments (frequency profile, gain profile) + sampling-clock offset model
-- **RX**: matched filter → symbol-rate estimation + resampling → coarse frequency estimator (VIVA) + NCO + AGC →
+- **RX**: (optional USRP RX streaming →) matched filter → symbol-rate estimation + resampling → coarse frequency estimator (VIVA) + NCO + AGC →
   Gardner timing recovery → decision-directed carrier phase tracking → 3× Viterbi + alignment lock →
   PRBS lock + descrambling
 
@@ -82,6 +82,14 @@ The configuration file is read by `Params::ReadParams` and defines:
 - **Transmitter**
   - `Method`: 0 = PRBS, 1 = file (`FileName`)
   - `RollOff`: RRC roll-off
+  - `FileName`: path to the input file if `Method` is 1
+  - `FreqHz`: RF center frequency in Hz (used by USRP TX)
+  - `GainDb`: hardware TX gain in dB (used by USRP TX)
+  - `SampleRate`: hardware TX sampling rate in sps (used by USRP TX)
+- **Receiver**
+  - `FreqHz`: RF center frequency in Hz (used by USRP RX)
+  - `SampleRate`: hardware RX sampling rate in sps (used by USRP RX)
+  - Contains sub-sections for DSP blocks: **CentralFrequency**, **SymbolRateEstimator**, **TimingTracking**, **PhaseTracking**, **ConstellationDisplay**
 - **Channel**
   - `Esn0`: Base Es/N0 in dB
   - `ApplyGainBeforeNoise`: if true, channel gain is applied to the signal before adding noise (effectively varying the SNR). If false, gain is applied to signal+noise.
@@ -123,6 +131,9 @@ The configuration file is read by `Params::ReadParams` and defines:
   - `PythonExe`, `PythonScript`: python interpreter and script path (default `src/constellation_display.py`).
   - `XDisplay`: optional DISPLAY override (e.g. `":0"`). Empty inherits the environment.
   - `Width`, `Height`, `ClearScreen`: legacy ASCII backend options (ignored by matplotlib).
+- **Operation**
+  - `Mode`: Top-level operating mode (0 = SIMULATION, 1 = TX_ONLY, 2 = RX_ONLY, 3 = TX_RX).
+  - `ref`: USRP clock reference (e.g. "internal", "external", "gpsdo").
 - **Simulation**
   - `Method`: simulation mode selector (see `SimModes` in `src/definitions.h`).
   - `NumErrors`: error budget used as a stop criterion in some modes.
