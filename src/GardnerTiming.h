@@ -49,6 +49,11 @@ public:
     int ProcessBlock(const float* inI, const float* inQ, int inLen,
                      float* outI, float* outQ, int outMax);
     bool IsLocked() const { return locked_; }
+    void ForceUnlock() { 
+        locked_ = false; 
+        historyOmegaFill_ = 0;
+        historyOmegaWr_ = 0;
+    }
     /// Last omega span used for lock decision: |max(historyOmega)-min(historyOmega)|.
     double GetLastOmegaLockSpan() const { return lastOmegaLockSpan_; }
     /// Omega span threshold for lock decision.

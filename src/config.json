@@ -3,23 +3,23 @@
     "Method": 0,
     "RollOff": 0.2,
     "FileName": "",
-    "FreqHz": 5800000000,
-    "GainDb":70.0,
-    "SampleRate": 6000000.0
+    "FreqHz": 868000000,
+    "GainDb":50.0,
+    "SampleRate": 5.0e6
   },
   "Receiver": {
-    "FreqHz": 5800000000,
-    "SampleRate": 6000000.0,
+    "FreqHz": 868010000,
+    "SampleRate": 5.0e6,
     "CentralFrequency": {
       "Enable": 1,
       "EstimationBlockSamples": 65536,
       "EstimatePeriodSec": 1.0,
-      "MaxOffsetHz": 2000000,
+      "MaxOffsetHz": 200000,
       "PeakToMedianThreshold": 8.0,
       "FftSizeMultiplier": 4,
       "NcoHzEmaAlpha": 0.4,
       "MaxHzSlewRate": 50000.0,
-      "PowerEmaAlpha": 0.01,
+      "PowerEmaAlpha": 0.1,
       "TargetAvgPower": 1.0
     },
     "SymbolRateEstimator": {
@@ -32,13 +32,13 @@
     },
     "TimingTracking": {
       "NominalOmega": 2.0,
-      "Kp": 0.001,
-      "Ki": 0.00001,
+      "Kp": 1.0e-3,
+      "Ki": 1.0e-5,
       "UpdatePeriodSymbols": 64
     },
     "PhaseTracking": {
-      "Kp": 0.005,
-      "Ki": 1.0e-6
+      "Kp": 2.0e-3,
+      "Ki": 2.0e-5
     },
     "ConstellationDisplay": {
       "PeriodSec": 1,
@@ -63,7 +63,7 @@
     "ClockMismatchPpm": 1000,
     "CarrierToSymbolRateRatio": 100,
     "AccelerationPeriod": 20.0,
-    "StablePeriod": 5.0
+    "StablePeriod": 8.0
   },
   "Operation": {
     "Mode": 3,

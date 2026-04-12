@@ -142,13 +142,20 @@ void ReceiverFreqCorrector::ThreadMain()
 
         // Detect PhaseDD delock to re-enable estimation
         const bool phaseLocked = phaseDD_ ? phaseDD_->IsLocked() : false;
-        if (prevPhaseLocked_ && !phaseLocked)
+        
+        // Check for forced restart from Receiver (Viterbi timeout)
+        if (forceRestart_.exchange(false, std::memory_order_relaxed)) {
+            accCount_ = 0;
+            estimateCollecting = true;
+            freqReady_.store(false, std::memory_order_relaxed);
+            nextEstimateStart = std::chrono::steady_clock::now();
+        }
+        else if (prevPhaseLocked_ && !phaseLocked)
         {
-            freqReady_.store(!cfg_.Enable, std::memory_order_relaxed);
+            freqReady_.store(false, std::memory_order_relaxed);
             accCount_ = 0;
             estimateCollecting = true;
             nextEstimateStart = std::chrono::steady_clock::now();
-            hasTargetHz_ = false;
             if (displayPeriodSec_ > 0.0) {
                 std::cout << "[CentralFreq] \033[31mDELOCK\033[0m"
                           << " PhaseDD -> re-enable estimation" << std::endl;
@@ -163,6 +170,12 @@ void ReceiverFreqCorrector::ThreadMain()
         {
             estimateCollecting = true;
             accCount_ = 0;
+            // Clear the buffers if we had partial data
+            accI_.clear();
+            accQ_.clear();
+            accI_.resize(cfg_.EstimationBlockSamples);
+            accQ_.resize(cfg_.EstimationBlockSamples);
+
             nextEstimateStart += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                 std::chrono::duration<double>(cfg_.EstimatePeriodSec));
             while (nextEstimateStart <= now_tp)
@@ -249,7 +262,22 @@ void ReceiverFreqCorrector::ThreadMain()
                         lastEstLog = now;
                     }
                 }
+                
+                // If freqReady_ is not set (i.e. still acquiring) OR we failed to detect, keep trying continuously 
+                // until we get a valid estimate. We don't want to wait for EstimatePeriodSec.
+                // ALSO, in continuous tracking mode, we just reset the counter to be ready when nextEstimateStart hits,
+                // but the prompt issue is that it *stops detecting* after 45s. This might be because the timer arithmetic overflowed
+                // or we somehow never reset estimateCollecting=true.
+                // It's safer to always reset accCount_ = 0 here to prepare for next collection.
                 accCount_ = 0;
+                
+                if (!freqReady_.load(std::memory_order_relaxed) || !r.Detected) {
+                    estimateCollecting = true;
+                    // Keep the nextEstimateStart moving forward to avoid timer stalls
+                    const auto now_now = std::chrono::steady_clock::now();
+                    nextEstimateStart = now_now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                        std::chrono::duration<double>(cfg_.EstimatePeriodSec));
+                }
             }
         }
 

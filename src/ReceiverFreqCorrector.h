@@ -69,9 +69,14 @@ public:
     double GetTargetHz() const { return targetHz_.load(std::memory_order_relaxed); }
     double GetGainDb() const { return gainDb_.load(std::memory_order_relaxed); }
 
+    // Force estimation to restart, used when Viterbi fails to lock for too long
+    void ForceEstimationRestart() { forceRestart_.store(true, std::memory_order_relaxed); }
+
 private:
     ReceiverFreqCorrectorConfig cfg_{};
     double displayPeriodSec_ = 1.0;
+    
+    std::atomic<bool> forceRestart_{false};
 
     BufferFloat* inRing_ = nullptr;
     std::mutex* inMtx_ = nullptr;

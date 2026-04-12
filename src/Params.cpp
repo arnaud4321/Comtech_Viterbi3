@@ -15,6 +15,10 @@ void Params::ReadParams(string FileName)
 	using json = nlohmann::json;
 	// read a JSON file
 	std::ifstream i(FileName);
+	if (!i.is_open()) {
+		std::cerr << "Error: Could not open configuration file " << FileName << std::endl;
+		exit(-1);
+	}
 	json j;
 	i >> j;
 
@@ -157,7 +161,7 @@ void Params::ReadParams(string FileName)
         if (s.contains("AllowRefinement")) SymRateCfg.AllowRefinement = s["AllowRefinement"].get<bool>();
 
         // Force refinement OFF if we are in loopback modes or simulation where TX/RX clocks are identical.
-        if (OpMode == FILE_TX || OpMode == TX_RX) {
+        if (TxMode == FILE_TX || OpMode == TX_RX) {
             SymRateCfg.AllowRefinement = false;
         }
     }

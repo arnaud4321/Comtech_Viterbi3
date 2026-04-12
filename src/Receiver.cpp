@@ -311,7 +311,8 @@ void Receiver::OperateFilter(void)
             objRxFilter.CreateOutputs(FilterInI, FilterInQ, FilterOutI, FilterOutQ, SPB);
             samples_total += static_cast<uint64_t>(SPB);
 
-            if (!symrate_collecting && now_sym >= next_symrate_start && !timingTracking_.IsLocked())
+            if (!symrate_collecting && now_sym >= next_symrate_start && 
+                (!timingTracking_.IsLocked() || !SymbolRateDetected.load(std::memory_order_relaxed)))
             {
                 symrate_collecting = true;
                 SymRateBatchCounter = 0;
@@ -326,9 +327,10 @@ void Receiver::OperateFilter(void)
 
             if (symrate_collecting)
             {
-                if (timingTracking_.IsLocked())
+                if (timingTracking_.IsLocked() && SymbolRateDetected.load(std::memory_order_relaxed))
                 {
-                    // Do not build a new symbol-rate estimate while Gardner is locked.
+                    // Do not build a new symbol-rate estimate while Gardner is locked, 
+                    // unless we haven't detected the symbol rate yet.
                     symrate_collecting = false;
                     SymRateBatchCounter = 0;
                     symRateEstimateReady = false;
@@ -1179,6 +1181,8 @@ skip_raw:;
                 {
                     static bool prevViterbiLocked = false;
                     static auto lastViterbiStatus = std::chrono::steady_clock::now();
+                    static auto viterbiUnlockTimerStart = std::chrono::steady_clock::time_point::min();
+
                     for(int i = 0; i < 3; i++)
                     {
                         std::unique_lock<std::mutex> lk(mtxQueues);
@@ -1260,6 +1264,7 @@ skip_raw:;
                                 break;   
                             }
                             ViterbiSynchronized = true;
+                            viterbiUnlockTimerStart = std::chrono::steady_clock::time_point::min();
                             if (displayPeriodSec_ > 0.0)
                             {
                                 std::cout << "[ViterbiSync] \033[32mLOCKED\033[0m"
@@ -1284,9 +1289,40 @@ skip_raw:;
                         prevViterbiLocked = false;
                     }
 
+                    // Timeout check: if Viterbi can't lock for 2s, force a full re-acquisition,
+                    // and keep doing it every 2s as long as Viterbi is not locked.
+                    const auto now = std::chrono::steady_clock::now();
+                    if (!ViterbiSynchronized) {
+                        if (viterbiUnlockTimerStart == std::chrono::steady_clock::time_point::min()) {
+                            viterbiUnlockTimerStart = now;
+                        } else if (std::chrono::duration<double>(now - viterbiUnlockTimerStart).count() > 2.0) {
+                            if (displayPeriodSec_ > 0.0) {
+                                std::cout << "[ViterbiSync] \033[31mACQUISITION TIMEOUT\033[0m Viterbi failed to lock after 2s. Forcing full unlock." << std::endl;
+                            }
+                            timingTracking_.ForceUnlock();
+                            phaseTrackingDD_.ForceUnlock();
+                            SymbolRateDetected.store(false, std::memory_order_relaxed);
+                            SymRateAcceptedCount = 0;
+                            
+                            // Force CentralFreqEstimator to restart its estimation process
+                            if (freqCorrector_.IsFreqReady()) {
+                                freqCorrector_.ForceEstimationRestart();
+                                if (displayPeriodSec_ > 0.0) {
+                                    std::cout << "[ViterbiSync] \033[31mACQUISITION TIMEOUT\033[0m -> Forcing CentralFreq to re-estimate." << std::endl;
+                                }
+                            }
+                            
+                            // Reset the timer to now, so it will trigger again in 2s if still not locked
+                            viterbiUnlockTimerStart = now;
+                            
+                            // Discard accumulated metrics to restart fresh after forced unlock
+                            for(int i = 0; i < 3; i++)
+                                oViterbi[i].reset_decoder();
+                        }
+                    }
+
                     // Periodic status (even before first lock) to explain why it's not locked.
                     {
-                        const auto now = std::chrono::steady_clock::now();
                         if (displayPeriodSec_ > 0.0 &&
                             now - lastViterbiStatus >= std::chrono::duration<double>(displayPeriodSec_))
                         {
@@ -1352,10 +1388,15 @@ skip_raw:;
                         if (displayPeriodSec_ > 0.0) {
                             std::cout << "[ViterbiSync] \033[31mDESYNC\033[0m EmaMetricsGrowth=" << CurrDebugStatistics.EmaMetricsGrowth << " > " << kViterbiDesyncGrowthThr << std::endl;
                         }
+                        
                         // Reset stats for next sync
                         CurrDebugStatistics.NumBatches = 0;
                         CurrDebugStatistics.SumMetricsGrowth = 0;
                         CurrDebugStatistics.MaxMetricsGrowth = 0;
+                        
+                        // We do NOT immediately force unlock Gardner and PhaseDD here anymore.
+                        // By leaving them locked, the timeout logic in the `if(!ViterbiSynchronized)` block
+                        // will give Viterbi 2 seconds to re-acquire before forcing a full system unlock.
                     }
                     #endif
 
@@ -1411,7 +1452,9 @@ skip_raw:;
                             if (PRBSSynchronized)
                             {
                                 prbsHighBerStreak_ = 0;
-                                if (displayPeriodSec_ > 0.0)
+                                static auto lastPrbsLockMsg = std::chrono::steady_clock::time_point::min();
+                                const auto now = std::chrono::steady_clock::now();
+                                if (displayPeriodSec_ > 0.0 && std::chrono::duration<double>(now - lastPrbsLockMsg).count() > displayPeriodSec_)
                                 {
                                     std::cout << "[PRBS] \033[32mLOCKED\033[0m"
                                               << " NumErrors=" << NumErrorsAtLock
@@ -1419,6 +1462,7 @@ skip_raw:;
                                               << " PtrStart=" << PtrStart
                                               << " Seed=" << PRBSSeed
                                               << std::endl;
+                                    lastPrbsLockMsg = now;
                                 }
                                 oPrbs.CreateOutputs(PRBSSeed, BatchSize3 - PtrStart, PrbsOut);
                                 CountErrors(OutputAll+PtrRdOut+PtrStart, PrbsOut, BatchSize3-PtrStart);
@@ -1432,7 +1476,8 @@ skip_raw:;
                             uint64_t diffErrors = NumErrorsAll - prevErrors;
                             uint64_t diffBits = NumBitsAll - prevBits;
                             
-                            // Debug mismatch
+                            // Debug mismatch (commented out to reduce console spam)
+                            /*
                             if (diffBits > 0 && (static_cast<double>(diffErrors) / diffBits) > 0.3) {
                                 std::cout << "[DEBUG] PRBS Mismatch! diffErrors=" << diffErrors << "/" << diffBits << std::endl;
                                 std::cout << "[DEBUG] OutputAll: ";
@@ -1441,6 +1486,7 @@ skip_raw:;
                                 for(int k=0; k<16; k++) std::cout << (int)(PrbsOut[k] & 1);
                                 std::cout << std::endl;
                             }
+                            */
 
                             // One noisy batch (fading, brief timing slip) used to force DESYNC and re-acquire PRBS,
                             // causing a "décrochage" loop. Require several consecutive bad batches.
@@ -1455,10 +1501,13 @@ skip_raw:;
                                     prbsHighBerStreak_++;
                                     if (PRBSSynchronized && prbsHighBerStreak_ >= kPrbsDesyncBadBatches)
                                     {
-                                        if (displayPeriodSec_ > 0.0) {
+                                        static auto lastPrbsDesyncMsg = std::chrono::steady_clock::time_point::min();
+                                        const auto now = std::chrono::steady_clock::now();
+                                        if (displayPeriodSec_ > 0.0 && std::chrono::duration<double>(now - lastPrbsDesyncMsg).count() > displayPeriodSec_) {
                                             std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER sustained "
                                                       << kPrbsDesyncBadBatches << " batches (last "
                                                       << diffErrors << "/" << diffBits << ")" << std::endl;
+                                            lastPrbsDesyncMsg = now;
                                         }
                                         PRBSSynchronized = false;
                                         prbsHighBerStreak_ = 0;

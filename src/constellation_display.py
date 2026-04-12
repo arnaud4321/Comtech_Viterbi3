@@ -226,6 +226,7 @@ t_hist = []
 ppm_applied = []
 ppm_sum = []
 ppm_sum_ema = None
+spec_pwr_ema = None
 gain_applied = []
 gain_corr = []
 f_applied = []
@@ -380,7 +381,14 @@ while True:
                     c_spec = c_pts
                 win = np.hanning(len(c_spec))
                 spec = np.fft.fftshift(np.fft.fft(c_spec * win))
-                mag = 20 * np.log10(np.abs(spec) + 1e-12)
+                pwr = np.abs(spec)**2
+                if spec_pwr_ema is None or len(spec_pwr_ema) != len(pwr):
+                    spec_pwr_ema = pwr
+                else:
+                    alpha_spec = 0.4  # Increased from 0.1 to adapt faster (e.g. if 1 update/sec)
+                    spec_pwr_ema = alpha_spec * pwr + (1.0 - alpha_spec) * spec_pwr_ema
+                
+                mag = 10 * np.log10(spec_pwr_ema + 1e-12)
                 if len(mag) > 0:
                     mag -= np.max(mag)  # Normalize peak to 0 dB
                 freqs = np.fft.fftshift(np.fft.fftfreq(len(c_spec), d=1.0))

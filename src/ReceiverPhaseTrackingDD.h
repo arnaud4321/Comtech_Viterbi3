@@ -50,6 +50,11 @@ public:
     bool WaitPopSymbolFrame(float* dstI, float* dstQ, int nSym);
 
     bool IsLocked() const { return locked_.load(std::memory_order_relaxed); }
+    void ForceUnlock() {
+        locked_.store(false, std::memory_order_relaxed);
+        lockCount_ = 0;
+        errEma_ = lockThresholdRad_ * 2.0f;
+    }
     double GetLastFreqEstHz() const { return lastFreqEstHz_.load(std::memory_order_relaxed); }
     /**
      * @brief Get the last computed Error Vector Magnitude (EVM) RMS.

@@ -185,6 +185,8 @@ int main(int argc, char* argv[])
 			     << std::defaultfloat
 			     << endl;
 #endif
+		auto colorLk = [](bool lk) { return lk ? "\033[32m1\033[0m" : "\033[31m0\033[0m"; };
+
 		cout << std::fixed << std::setprecision(6)
 			     << "[Main] t_sim=" << stats.t_sim << " s"
 			     << " t_rate=" << stats.t_rate << " s"
@@ -193,17 +195,17 @@ int main(int argc, char* argv[])
 			     << " evmRms=" << stats.evmRms
 			     << " samplerMsps=" << stats.samplerMsps
 			     << " rxFilterMsps=" << stats.rxFilterMsps
-			     << " symRateLk=" << stats.isSymRateLocked
+			     << " symRateLk=" << colorLk(stats.isSymRateLocked)
 			     << " symRateMsps=" << stats.symRateMsps
-			     << " centralRdy=" << stats.isCentralFreqReady
+			     << " centralRdy=" << colorLk(stats.isCentralFreqReady)
 			     << " ncoHz=" << stats.centralNcoHz
 			     << " gainDb=" << stats.gainDb
-			     << " gardnerLk=" << stats.isGardnerLocked
+			     << " gardnerLk=" << colorLk(stats.isGardnerLocked)
 			     << " gardnerPpm=" << stats.gardnerPpm
-			     << " phaseLk=" << stats.isPhaseLocked
+			     << " phaseLk=" << colorLk(stats.isPhaseLocked)
 			     << " phaseFreqHz=" << stats.phaseFreqHz
-			     << " vitLk=" << stats.isViterbiLocked
-			     << " prbsLk=" << stats.isPrbsLocked
+			     << " vitLk=" << colorLk(stats.isViterbiLocked)
+			     << " prbsLk=" << colorLk(stats.isPrbsLocked)
 			     << " bits=" << stats.numBits
 			     << " errors=" << stats.numErrors
 			     << " BER=" << std::scientific << std::setprecision(6)

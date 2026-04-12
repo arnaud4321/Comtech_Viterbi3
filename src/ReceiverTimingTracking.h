@@ -54,6 +54,10 @@ public:
     /// Blocks until a full frame is available or shutdown. Copies nSym symbols into dstI/dstQ; false if stopped with no frame.
     bool WaitPopSymbolFrame(float* dstI, float* dstQ, int nSym);
     bool IsLocked() const { return locked_.load(std::memory_order_relaxed); }
+    void ForceUnlock() { 
+        locked_.store(false, std::memory_order_relaxed);
+        gardner_.ForceUnlock();
+    }
     double GetGardnerOmega() const { return gardner_.GetOmega(); }
     double GetGardnerOmegaNom() const { return gardner_.GetOmegaNom(); }
 
