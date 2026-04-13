@@ -95,6 +95,13 @@ void Params::ReadParams(string FileName)
     else
         Debug = true;
 
+    {
+        const json iqReplay = sim.value("IqFileReplay", json::object());
+        IqFileReplayEnable = iqReplay.value("Enable", false);
+        IqFileReplayPath = iqReplay.value("Path", std::string(""));
+        IqFileReplayLoop = iqReplay.value("Loop", false);
+    }
+
     DisplayPeriodSec = j["Simulation"].value("DisplayPeriodSec", 1.0);
     // > 0: periodic status interval (s). <= 0: no periodic logs; lock/unlock (and similar) events only.
 

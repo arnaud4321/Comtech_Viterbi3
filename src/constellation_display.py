@@ -1,8 +1,9 @@
 import sys
-import select
 import os
 import time
 import math
+import queue
+import threading
 import traceback
 from pathlib import Path
 
@@ -157,9 +158,28 @@ def apply_limits():
     ax.set_ylim(-max_abs, max_abs)
 
 
+def raise_constellation_window():
+    """TkAgg: la fenêtre peut rester derrière le terminal ou ne pas se mapper sans un lift explicite."""
+    try:
+        w = getattr(fig.canvas.manager, "window", None)
+        if w is None:
+            return
+        try:
+            w.lift()
+        except Exception:
+            pass
+        try:
+            w.focus_force()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 apply_limits()
 plt.show(block=False)
 plt.pause(0.001)
+raise_constellation_window()
 
 ax_ppm.set_title("Total PPM: applied vs estimated")
 ax_ppm.set_ylabel("ppm")
@@ -245,56 +265,50 @@ last_draw = 0.0
 last_ylim_update = 0.0
 x_window_sec = 180.0
 
-while True:
-    # Let GUI process events even when no data arrives
-    plt.pause(0.001)
-    if stdin_closed:
-        # Parent closed the pipe without QUIT (e.g. kill -9): close the GUI and exit.
-        try:
-            plt.close(fig)
-        except Exception:
-            pass
-        break
+# Événements stdin → file (découplage Tk/matplotlib). Le thread lit en continu pour ne pas
+# mélanger select/readline TextIOWrapper avec la boucle GUI (souvent: aucune donnée affichée).
+evt_q = queue.Queue()
 
-    # Read and parse as fast as possible to drain the pipe (prevents slowing down the simulation).
-    r, _, _ = select.select([sys.stdin], [], [], 0.05)
-    if r:
-        line = sys.stdin.readline()
+
+def _decode_line(raw: bytes) -> str:
+    return raw.decode("ascii", errors="replace").strip()
+
+
+def _stdin_reader():
+    """Lit le protocole C++ sur stdin (binaire) sans partager le GIL avec les redraws."""
+    bio = sys.stdin.buffer
+    while True:
+        try:
+            line = bio.readline()
+        except Exception:
+            evt_q.put(("EOF",))
+            return
         if not line:
-            stdin_closed = True
+            evt_q.put(("EOF",))
+            return
+        s = _decode_line(line)
+        if not s:
             continue
-        line = line.strip()
-        if not line:
+        if s.startswith("QUIT"):
+            evt_q.put(("QUIT",))
+            return
+        if s.startswith("CONFIG"):
+            evt_q.put(("CONFIG", s))
             continue
-        if line.startswith("QUIT"):
-            break
-        if line.startswith("CONFIG"):
-            kv = parse_kv(line)
-            if "maxAbs" in kv:
-                try:
-                    max_abs = float(kv["maxAbs"])
-                except Exception:
-                    pass
-            if "drawPeriodSec" in kv:
-                try:
-                    v = float(kv["drawPeriodSec"])
-                    if v > 0.0:
-                        draw_period = v
-                except Exception:
-                    pass
-            apply_limits()
-            dirty = True
-            continue
-        if line.startswith("FRAME"):
-            kv = parse_kv(line)
+        if s.startswith("FRAME"):
+            kv = parse_kv(s)
             pts_x = []
             pts_y = []
             while True:
-                l2 = sys.stdin.readline()
-                if not l2:
-                    stdin_closed = True
-                    break
-                l2 = l2.strip()
+                try:
+                    l2b = bio.readline()
+                except Exception:
+                    evt_q.put(("EOF",))
+                    return
+                if not l2b:
+                    evt_q.put(("EOF",))
+                    return
+                l2 = _decode_line(l2b)
                 if l2 == "END":
                     break
                 try:
@@ -303,64 +317,121 @@ while True:
                     pts_y.append(float(y))
                 except Exception:
                     continue
+            evt_q.put(("FRAME", kv, pts_x, pts_y))
+            continue
 
-            latest_pts = (pts_x, pts_y)
-            latest_kv = kv
-            dirty = True
 
-            # Update history arrays (cheap) but do not redraw yet.
-            try:
-                if "t_sim" in kv:
-                    t = float(kv["t_sim"])
-                    t_hist.append(t)
-                    ppm_applied.append(float(kv.get("chanTotalPpm", "nan")))
-                    vppm = float(kv.get("rxTotalPpmCorr", "nan"))
-                    # Light smoothing for display only (EMA).
-                    if vppm == vppm:
-                        if ppm_sum_ema is None:
-                            ppm_sum_ema = vppm
-                        else:
-                            ppm_sum_ema = 0.15 * vppm + 0.85 * ppm_sum_ema
-                    ppm_sum.append(ppm_sum_ema if ppm_sum_ema is not None else vppm)
-                    gain_applied.append(float(kv.get("chanGainDb", kv.get("chanRangeDb", "nan"))))
-                    gain_corr.append(float(kv.get("gainDb", "nan")))
-                    f_a = float(kv.get("chanFreqHz", "nan"))
-                    f_c = float(kv.get("centralNcoHz", "nan")) + float(kv.get("phaseFreqHz", "0.0"))
-                    f_applied.append(f_a)
-                    f_corr.append(f_c)
-                    
-                    snr_applied.append(float(kv.get("chanSnrDb", "nan")))
-                    snr_est.append(float(kv.get("snrFromEvmDb", "nan")))
-                    
-                    ber_v = float(kv.get("ber", "nan"))
-                    if ber_v == 0.0:
-                        ber_v = 1e-9 # avoid log scale zero issues
-                    ber_hist.append(ber_v)
-                    
-                    vit = str(kv.get("vitLocked", "0")).strip()
-                    prbs = str(kv.get("prbsLocked", "0")).strip()
-                    lock_vit.append(0.95 if vit == "1" else 0.0)
-                    lock_prbs.append(1.0 if prbs == "1" else 0.05)
+threading.Thread(target=_stdin_reader, name="constellation_stdin", daemon=True).start()
 
-                    if len(t_hist) > hist_max:
-                        t_hist[:] = t_hist[-hist_max:]
-                        ppm_applied[:] = ppm_applied[-hist_max:]
-                        ppm_sum[:] = ppm_sum[-hist_max:]
-                        gain_applied[:] = gain_applied[-hist_max:]
-                        gain_corr[:] = gain_corr[-hist_max:]
-                        f_applied[:] = f_applied[-hist_max:]
-                        f_corr[:] = f_corr[-hist_max:]
-                        snr_applied[:] = snr_applied[-hist_max:]
-                        snr_est[:] = snr_est[-hist_max:]
-                        ber_hist[:] = ber_hist[-hist_max:]
-                        lock_vit[:] = lock_vit[-hist_max:]
-                        lock_prbs[:] = lock_prbs[-hist_max:]
-            except Exception:
-                pass
+
+def _apply_frame_history(kv):
+    global ppm_sum_ema
+    try:
+        if "t_sim" not in kv:
+            return
+        t = float(kv["t_sim"])
+        t_hist.append(t)
+        ppm_applied.append(float(kv.get("chanTotalPpm", "nan")))
+        vppm = float(kv.get("rxTotalPpmCorr", "nan"))
+        if vppm == vppm:
+            if ppm_sum_ema is None:
+                ppm_sum_ema = vppm
+            else:
+                ppm_sum_ema = 0.15 * vppm + 0.85 * ppm_sum_ema
+        ppm_sum.append(ppm_sum_ema if ppm_sum_ema is not None else vppm)
+        gain_applied.append(float(kv.get("chanGainDb", kv.get("chanRangeDb", "nan"))))
+        gain_corr.append(float(kv.get("gainDb", "nan")))
+        f_a = float(kv.get("chanFreqHz", "nan"))
+        f_c = float(kv.get("centralNcoHz", "nan")) + float(kv.get("phaseFreqHz", "0.0"))
+        f_applied.append(f_a)
+        f_corr.append(f_c)
+
+        snr_applied.append(float(kv.get("chanSnrDb", "nan")))
+        snr_est.append(float(kv.get("snrFromEvmDb", "nan")))
+
+        ber_v = float(kv.get("ber", "nan"))
+        if ber_v == 0.0:
+            ber_v = 1e-9
+        ber_hist.append(ber_v)
+
+        vit = str(kv.get("vitLocked", "0")).strip()
+        prbs = str(kv.get("prbsLocked", "0")).strip()
+        lock_vit.append(0.95 if vit == "1" else 0.0)
+        lock_prbs.append(1.0 if prbs == "1" else 0.05)
+
+        if len(t_hist) > hist_max:
+            t_hist[:] = t_hist[-hist_max:]
+            ppm_applied[:] = ppm_applied[-hist_max:]
+            ppm_sum[:] = ppm_sum[-hist_max:]
+            gain_applied[:] = gain_applied[-hist_max:]
+            gain_corr[:] = gain_corr[-hist_max:]
+            f_applied[:] = f_applied[-hist_max:]
+            f_corr[:] = f_corr[-hist_max:]
+            snr_applied[:] = snr_applied[-hist_max:]
+            snr_est[:] = snr_est[-hist_max:]
+            ber_hist[:] = ber_hist[-hist_max:]
+            lock_vit[:] = lock_vit[-hist_max:]
+            lock_prbs[:] = lock_prbs[-hist_max:]
+    except Exception:
+        pass
+
+
+while True:
+    # Laisser Tk traiter les événements même sans nouvelles données
+    plt.pause(0.02)
+
+    if stdin_closed:
+        try:
+            plt.close(fig)
+        except Exception:
+            pass
+        break
+
+    try:
+        while True:
+            evt = evt_q.get_nowait()
+            if evt[0] == "EOF":
+                stdin_closed = True
+                break
+            if evt[0] == "QUIT":
+                stdin_closed = True
+                break
+            if evt[0] == "CONFIG":
+                _, line = evt
+                kv = parse_kv(line)
+                if "maxAbs" in kv:
+                    try:
+                        max_abs = float(kv["maxAbs"])
+                    except Exception:
+                        pass
+                if "drawPeriodSec" in kv:
+                    try:
+                        v = float(kv["drawPeriodSec"])
+                        if v > 0.0:
+                            draw_period = v
+                    except Exception:
+                        pass
+                apply_limits()
+                dirty = True
+            elif evt[0] == "FRAME":
+                _, kv, pts_x, pts_y = evt
+                latest_pts = (pts_x, pts_y)
+                latest_kv = kv
+                dirty = True
+                _apply_frame_history(kv)
+    except queue.Empty:
+        pass
+
+    if stdin_closed:
+        try:
+            plt.close(fig)
+        except Exception:
+            pass
+        break
 
     # Throttled rendering (keeps GUI responsive without blocking the simulation).
     now = time.time()
-    if dirty and (now - last_draw) >= draw_period and plt.fignum_exists(fig.number):
+    if dirty and (now - last_draw) >= draw_period:
         dirty = False
         last_draw = now
 

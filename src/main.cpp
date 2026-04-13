@@ -10,6 +10,7 @@
  */
 
 #include "definitions.h"
+#include <clocale>
 #include <iomanip>
 #include <iostream>
 #include <thread>
@@ -25,6 +26,7 @@ using namespace std;
 #include "AWGNChannel.h"
 #include "Receiver.h"
 #include "Sampler.h"
+#include "FileSampler.h"
 #include "UHDSampler.h"
 #include "TransmitterManager.h"
 #include "USRPInit.h"
@@ -50,6 +52,10 @@ void signal_handler(int signal)
  */
 int main(int argc, char* argv[])
 {
+	// Garantit des points décimaux ASCII pour snprintf/dprintf (constellation Python, logs, etc.)
+	// même si l'environnement utilise une locale avec virgule (ex. fr_FR.UTF-8).
+	std::setlocale(LC_NUMERIC, "C");
+
 	if(argc != 2)
 	{
 		cout<<"File configuration is needed. Exiting ..."<<endl;
@@ -69,13 +75,14 @@ int main(int argc, char* argv[])
     objParams.ReadParams(argv[1]);
 
 	Transmitter* oTx = nullptr;
-	if (objParams.OpMode != RX_ONLY) {
+	const bool iqFileReplay = (objParams.OpMode == NOT_OP && objParams.IqFileReplayEnable);
+	if (objParams.OpMode != RX_ONLY && !iqFileReplay) {
 		oTx = new Transmitter();
-		oTx->StartThreads(PRBS_TX,objParams.RollOff);
+		oTx->StartThreads(objParams.TxMode, objParams.RollOff, objParams.TxFileName);
 	}
 	
 	AWGNChannel* oAWGN = nullptr;
-	if (objParams.OpMode == NOT_OP) {
+	if (objParams.OpMode == NOT_OP && !iqFileReplay) {
 		oAWGN = new AWGNChannel(objParams.Seed);
 		oAWGN->SetTransmitter(oTx);
 		oAWGN->SetParameters(&objParams);
@@ -90,7 +97,14 @@ int main(int argc, char* argv[])
 		pUSRPInit = new USRPInit(objParams.RxFreq, objParams.TxFreq, 0, objParams.TxGaindb, 0, objParams.ref, objParams.RxSampleRate, objParams.TxSampleRate);
 	}
 
-	if (objParams.OpMode == NOT_OP) {
+	if (iqFileReplay) {
+		if (objParams.IqFileReplayPath.empty()) {
+			std::cerr << "[Main] Simulation.IqFileReplay.Enable requires a non-empty Path to the IQ .bin file."
+			          << std::endl;
+			exit(-1);
+		}
+		objSampler = new FileSampler(objParams.IqFileReplayPath, objParams.IqFileReplayLoop, objParams.Debug);
+	} else if (objParams.OpMode == NOT_OP) {
 		objSampler = new Sampler(objParams.Debug);
 		objSampler->SetChannel(oAWGN);
 	} else if (objParams.OpMode != TX_ONLY) {
@@ -124,7 +138,8 @@ int main(int argc, char* argv[])
 	auto Start = std::chrono::high_resolution_clock::now();
 
 	condition_variable *pcv_rx_out, *pcv_out_rx;
-	if(oRx != nullptr && objParams.TxMode == FILE_TX)
+	// FILE_TX legacy path: drain one RX output slot then exit (no TX in iqFileReplay — use normal loop there).
+	if (oRx != nullptr && objParams.TxMode == FILE_TX && !iqFileReplay)
 	{
 		unsigned char *Out = nullptr;
 		
@@ -231,7 +246,27 @@ int main(int argc, char* argv[])
     }
 
     std::cout << "[Main] Stopping Receiver..." << std::endl;
-    if (oRx) oRx->StopThreads();
+    if (oRx) {
+        auto Now = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed = Now - Start;
+        RxStatistics stats = oRx->GetRxStatistics(elapsed.count());
+        auto colorLk = [](bool lk) { return lk ? "\033[32m1\033[0m" : "\033[31m0\033[0m"; };
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[Main][FINAL] t_sim=" << stats.t_sim << " s"
+                  << " t_rate=" << stats.t_rate << " s"
+                  << " snrEvmDb=" << stats.snrFromEvmDb
+                  << " symRateLk=" << colorLk(stats.isSymRateLocked)
+                  << " gardnerLk=" << colorLk(stats.isGardnerLocked)
+                  << " phaseLk=" << colorLk(stats.isPhaseLocked)
+                  << " vitLk=" << colorLk(stats.isViterbiLocked)
+                  << " prbsLk=" << colorLk(stats.isPrbsLocked)
+                  << " bits=" << stats.numBits
+                  << " errors=" << stats.numErrors
+                  << " BER=" << std::scientific << std::setprecision(6)
+                  << stats.ber
+                  << std::defaultfloat << std::endl;
+        oRx->StopThreads();
+    }
     std::cout << "[Main] Stopping TransmitterManager..." << std::endl;
     if (pTxManager) pTxManager->StopThreads();
     std::cout << "[Main] Stopping Sampler..." << std::endl;

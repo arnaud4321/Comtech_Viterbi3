@@ -249,9 +249,14 @@ void ReceiverPhaseTrackingDD::ThreadMain()
 #endif
 
         // When locked, update the DD-PLL only once every N symbols to reduce CPU.
-        // Gains are scaled by N on update symbols to roughly preserve loop bandwidth.
+        // We accumulate phase error over each block of N symbols, then apply one 2nd-order
+        // update with unscaled Kp/Ki on the sum: freq += Ki*sum(e), phase += freq + Kp*sum(e).
+        // That matches N integrator steps when e is slowly varying, without N× noise on one sample.
         constexpr int kLockedUpdateDecim = 4;
         bool lockedLocal = locked_.load(std::memory_order_relaxed);
+        static float lockedDecimErrSum = 0.0f;
+        if (!lockedLocal || kLockedUpdateDecim <= 1)
+            lockedDecimErrSum = 0.0f;
 
         float sumMagSq = 0.0f;
         float sumMag = 0.0f;
@@ -281,17 +286,16 @@ void ReceiverPhaseTrackingDD::ThreadMain()
             qpsk_slicer(zrI, zrQ, di, dq);
 
             float err = 0.0f;
-            const bool doUpdate = (!lockedLocal) || (kLockedUpdateDecim <= 1) || ((n % kLockedUpdateDecim) == 0);
-            if (doUpdate)
-            {
-                err = dd_phase_error(zrI, zrQ, di, dq);
+            err = dd_phase_error(zrI, zrQ, di, dq);
 
-                // 2nd-order PLL update (symbol-rate loop)
+            const bool lockedDecim = lockedLocal && (kLockedUpdateDecim > 1);
+            if (!lockedDecim)
+            {
+                // 2nd-order PLL update every symbol (acquisition or no decimation).
                 freqRadPerSym_ += ki_ * err;
                 phaseRad_ += freqRadPerSym_ + kp_ * err;
                 phaseRad_ = wrap_pm_pi(phaseRad_);
 
-                // Lock detection on smoothed |err| (only needed until lock is reached).
                 if (!lockedLocal)
                 {
                     const float aerr = std::abs(err);
@@ -309,8 +313,18 @@ void ReceiverPhaseTrackingDD::ThreadMain()
             }
             else
             {
-                // When skipping the DD update, still advance the phase using current frequency estimate.
-                phaseRad_ += freqRadPerSym_;
+                // Locked: accumulate error; one PLL update per N symbols (sum of errors, unscaled gains).
+                lockedDecimErrSum += err;
+                if (((n + 1) % kLockedUpdateDecim) == 0)
+                {
+                    freqRadPerSym_ += ki_ * lockedDecimErrSum;
+                    phaseRad_ += freqRadPerSym_ + kp_ * lockedDecimErrSum;
+                    lockedDecimErrSum = 0.0f;
+                }
+                else
+                {
+                    phaseRad_ += freqRadPerSym_;
+                }
                 phaseRad_ = wrap_pm_pi(phaseRad_);
             }
 
@@ -351,6 +365,14 @@ void ReceiverPhaseTrackingDD::ThreadMain()
 #endif
         }
 
+        // Trame courte ou taille non multiple de N : appliquer le bloc d'erreur partiel restant.
+        if (locked_.load(std::memory_order_relaxed) && kLockedUpdateDecim > 1 && lockedDecimErrSum != 0.0f)
+        {
+            freqRadPerSym_ += ki_ * lockedDecimErrSum;
+            phaseRad_ += freqRadPerSym_ + kp_ * lockedDecimErrSum;
+            lockedDecimErrSum = 0.0f;
+        }
+
         float blockEvmRms = 0.0f;
         if (sumMagSq > 1e-12f && sumMag > 1e-12f)
         {
@@ -377,16 +399,15 @@ void ReceiverPhaseTrackingDD::ThreadMain()
             const double t_rate = static_cast<double>(symbols_total) / rsDenom;
             const double t_sim =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-            if (displayPeriodSec_ > 0.0)
-            {
-                std::cout << "[ReceiverPhaseTrackingDD] "
-                          << (nowLocked ? "\033[32mLOCKED\033[0m" : "\033[31mUNLOCKED\033[0m")
-                          << " t_sim=" << t_sim << " s"
-                          << " t_rate=" << t_rate << " s"
-                          << " errEma=" << errEma_ << " rad"
-                          << " thresh=" << lockThresholdRad_ << " rad"
-                          << std::endl;
-            }
+            
+            std::cout << "[ReceiverPhaseTrackingDD] "
+                      << (nowLocked ? "\033[32mLOCKED\033[0m" : "\033[31mUNLOCKED\033[0m")
+                      << " t_sim=" << t_sim << " s"
+                      << " t_rate=" << t_rate << " s"
+                      << " errEma=" << errEma_ << " rad"
+                      << " thresh=" << lockThresholdRad_ << " rad"
+                      << std::endl;
+            
             prevLocked = nowLocked;
         }
 

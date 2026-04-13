@@ -37,9 +37,10 @@ private:
     #define STOP_SAMPLE_S 6000000
     #endif
     
+protected:
+    /// Pacing flag and nominal batch duration in seconds (subclasses e.g. @ref FileSampler may read these).
     bool Debug;
     double TimeBatch;
-protected:
     double displayPeriodSec_ = 1.0;
     /// Wall-time window for lastThroughputMsps_ (constellation overlay); console line uses displayPeriodSec_ when >0.
     double throughputMeasurePeriodSec_ = 1.0;

@@ -51,6 +51,12 @@ public:
     unsigned int NumErrors;
     unsigned int Seed;
     bool Debug;
+    /// When @c OpMode is @c NOT_OP, replay int16 interleaved IQ from disk instead of AWGN+TX (see @ref FileSampler).
+    bool IqFileReplayEnable = false;
+    /// Path to binary IQ file (short I,Q,...), same format as @c InputRecording.bin from @ref UHDSampler.
+    string IqFileReplayPath;
+    /// If true, rewind at EOF; if false, stop the file producer at EOF.
+    bool IqFileReplayLoop = true;
     /// Console status: >0 = periodic interval (s); <=0 = events only (lock/unlock, etc.), no periodic lines.
     double DisplayPeriodSec = 1.0;
     SymbolRateEstimatorConfig SymRateCfg;

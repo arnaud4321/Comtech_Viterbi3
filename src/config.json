@@ -5,11 +5,11 @@
     "FileName": "",
     "FreqHz": 868000000,
     "GainDb":50.0,
-    "SampleRate": 5.0e6
+    "SampleRate": 21.42e6
   },
   "Receiver": {
     "FreqHz": 868010000,
-    "SampleRate": 5.0e6,
+    "SampleRate": 21.42e6,
     "CentralFrequency": {
       "Enable": 1,
       "EstimationBlockSamples": 65536,
@@ -18,7 +18,7 @@
       "PeakToMedianThreshold": 8.0,
       "FftSizeMultiplier": 4,
       "NcoHzEmaAlpha": 0.4,
-      "MaxHzSlewRate": 50000.0,
+      "MaxHzSlewRate": 10000.0,
       "PowerEmaAlpha": 0.1,
       "TargetAvgPower": 1.0
     },
@@ -37,17 +37,17 @@
       "UpdatePeriodSymbols": 64
     },
     "PhaseTracking": {
-      "Kp": 2.0e-3,
-      "Ki": 2.0e-5
+      "Kp": 1.0e-3,
+      "Ki": 1.0e-5
     },
     "ConstellationDisplay": {
-      "PeriodSec": 1,
+      "PeriodSec": 1.0,
       "NumSymbols": 2048,
       "MaxAbs": 2.0,
       "Backend": "matplotlib",
       "PythonExe": "python3",
       "PythonScript": "src/constellation_display.py",
-      "XDisplay": ":1",
+      "XDisplay": "",
       "Width": 61,
       "Height": 31,
       "ClearScreen": 0
@@ -74,6 +74,11 @@
     "NumErrors": 0,
     "Seed": 132345,
     "Debug": 0,
-    "DisplayPeriodSec": 1.0
+    "DisplayPeriodSec": 0.0,
+    "IqFileReplay": {
+      "Enable": true,
+      "Path": "/home/agueguen/Documents/Projets/Comtech_Viterbi3/data/InputRecording.bin",
+      "Loop": false
+    }
   }
 }

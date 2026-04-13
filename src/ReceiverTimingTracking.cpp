@@ -245,16 +245,15 @@ void ReceiverTimingTracking::ThreadMain()
             const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
             const double t_sim =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-            if (displayPeriodSec_ > 0.0)
-            {
-                std::cout << "[GardnerTiming] "
-                          << (nowLocked ? "\033[32mLOCKED\033[0m" : "\033[31mUNLOCKED\033[0m")
-                          << " omegaSpan=" << gardner_.GetLastOmegaLockSpan()
-                          << " thresh=" << gardner_.GetOmegaLockSpanThreshold()
-                          << " t_sim=" << t_sim << " s"
-                          << " t_rate=" << t_rate << " s"
-                          << std::endl;
-            }
+            
+            std::cout << "[GardnerTiming] "
+                      << (nowLocked ? "\033[32mLOCKED\033[0m" : "\033[31mUNLOCKED\033[0m")
+                      << " omegaSpan=" << gardner_.GetLastOmegaLockSpan()
+                      << " thresh=" << gardner_.GetOmegaLockSpanThreshold()
+                      << " t_sim=" << t_sim << " s"
+                      << " t_rate=" << t_rate << " s"
+                      << std::endl;
+            
             prevLocked = nowLocked;
         }
 

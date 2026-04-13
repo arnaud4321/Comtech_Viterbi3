@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.12)
 
 # Optional Intel oneAPI compiler (set before project())
 set(INTEL_COMPILER_ROOT "/opt/intel/oneapi/compiler/latest" CACHE PATH "Intel oneAPI compiler installation directory")
@@ -47,8 +47,8 @@ else()
 endif()
 set(CMAKE_EXE_LINKER_FLAGS_DEBUG "")
 
-# #source files
-FILE(GLOB  Sources ${PROJECT_SOURCE_DIR}/src/*.c??)
+# Source files (CONFIGURE_DEPENDS: re-run CMake when matching files are added/removed under src/)
+file(GLOB Sources CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/src/*.c??)
 
 add_custom_target(update_version
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})

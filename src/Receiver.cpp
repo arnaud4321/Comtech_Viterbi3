@@ -370,37 +370,33 @@ void Receiver::OperateFilter(void)
                     const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
                     const double t_sim =
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-                    if (displayPeriodSec_ > 0.0) {
-                        std::cout << "[SymbolRateEstimator] \033[32mDetected\033[0m: " << (est.SymbolRateHz / 1e6)
-                                  << " Msym/s"
-                                  << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
-                                  << " t_sim=" << t_sim << " s"
-                                  << " t_rate=" << t_rate << " s"
-                                  << " (search kMax=" << est.SearchKMaxBins
-                                  << ", fMax=" << est.SearchMaxOffsetHz << " Hz)"
-                                  << " (FFT res " << est.FftResolutionHz
-                                  << " Hz, peak/median " << est.PeakToMedian
-                                  << ", threshold " << SymRatePeakToMedianThreshold << ")" << std::endl;
-                    }
+                    std::cout << "[SymbolRateEstimator] \033[32mDetected\033[0m: " << (est.SymbolRateHz / 1e6)
+                              << " Msym/s"
+                              << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                              << " t_sim=" << t_sim << " s"
+                              << " t_rate=" << t_rate << " s"
+                              << " (search kMax=" << est.SearchKMaxBins
+                              << ", fMax=" << est.SearchMaxOffsetHz << " Hz)"
+                              << " (FFT res " << est.FftResolutionHz
+                              << " Hz, peak/median " << est.PeakToMedian
+                              << ", threshold " << SymRatePeakToMedianThreshold << ")" << std::endl;
                 }
                 else
                 {
                     const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
                     const double t_sim =
                         std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-                    if (displayPeriodSec_ > 0.0) {
-                        std::cout << "[SymbolRateEstimator] \033[31mNot detected\033[0m"
-                                  << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
-                                  << " t_sim=" << t_sim << " s"
-                                  << " t_rate=" << t_rate << " s"
-                                  << " (reason: " << (est.FailReason ? est.FailReason : "") << ")"
-                                  << " (search kMax=" << est.SearchKMaxBins
-                                  << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
-                                  << ", dF=" << est.FftResolutionHz << " Hz"
-                                  << ", peak/median=" << est.PeakToMedian
-                                  << ", threshold=" << SymRatePeakToMedianThreshold << ")"
-                                  << std::endl;
-                    }
+                    std::cout << "[SymbolRateEstimator] \033[31mNot detected\033[0m"
+                              << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                              << " t_sim=" << t_sim << " s"
+                              << " t_rate=" << t_rate << " s"
+                              << " (reason: " << (est.FailReason ? est.FailReason : "") << ")"
+                              << " (search kMax=" << est.SearchKMaxBins
+                              << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
+                              << ", dF=" << est.FftResolutionHz << " Hz"
+                              << ", peak/median=" << est.PeakToMedian
+                              << ", threshold=" << SymRatePeakToMedianThreshold << ")"
+                              << std::endl;
                 }
             }
             else if (est.Detected)
@@ -427,15 +423,13 @@ void Receiver::OperateFilter(void)
                         const double t_sim =
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
                         const double delta_ppm = (refined - prev) * 1.0e6 / std::max(1.0, prev);
-                        if (displayPeriodSec_ > 0.0) {
-                            std::cout << "[SymbolRateEstimator] \033[32mRe-estimated\033[0m: " << (refined / 1e6)
-                                      << " Msym/s"
-                                      << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
-                                      << " t_sim=" << t_sim << " s"
-                                      << " t_rate=" << t_rate << " s"
-                                      << " (delta " << delta_ppm << " ppm, peak/median " << est.PeakToMedian << ")"
-                                      << std::endl;
-                        }
+                        std::cout << "[SymbolRateEstimator] \033[32mRe-estimated\033[0m: " << (refined / 1e6)
+                                  << " Msym/s"
+                                  << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                                  << " t_sim=" << t_sim << " s"
+                                  << " t_rate=" << t_rate << " s"
+                                  << " (delta " << delta_ppm << " ppm, peak/median " << est.PeakToMedian << ")"
+                                  << std::endl;
                     }
                 }
             }
@@ -444,24 +438,22 @@ void Receiver::OperateFilter(void)
                 const double t_rate = static_cast<double>(samples_total) / SamplingFrequency;
                 const double t_sim =
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
-                if (displayPeriodSec_ > 0.0) {
-                    std::cout << "[SymbolRateEstimator] \033[31mRe-estimation not detected\033[0m"
-                              << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
-                              << " t_sim=" << t_sim << " s"
-                              << " t_rate=" << t_rate << " s"
-                              << " (reason: " << (est.FailReason ? est.FailReason : "") << ")"
-                              << " (search kMax=" << est.SearchKMaxBins
-                              << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
-                              << ", dF=" << est.FftResolutionHz << " Hz"
-                              << ", peak/median=" << est.PeakToMedian << ")"
-                              << std::endl;
-                }
+                std::cout << "[SymbolRateEstimator] \033[31mRe-estimation not detected\033[0m"
+                          << " [window " << SymRateBatchCounter << "/" << SymRateWindowBatches << "]"
+                          << " t_sim=" << t_sim << " s"
+                          << " t_rate=" << t_rate << " s"
+                          << " (reason: " << (est.FailReason ? est.FailReason : "") << ")"
+                          << " (search kMax=" << est.SearchKMaxBins
+                          << ", fMax=" << est.SearchMaxOffsetHz << " Hz"
+                          << ", dF=" << est.FftResolutionHz << " Hz"
+                          << ", peak/median=" << est.PeakToMedian << ")"
+                          << std::endl;
             }
             symrate_collecting = false;
             SymRateBatchCounter = 0;
 
             // Only display the "current estimate" line when a new estimate was accepted.
-            if (newSymRateEstimate && displayPeriodSec_ > 0.0)
+            if (newSymRateEstimate)
             {
                 std::cout << "Current symbol rate estimate: "
                           << (SymbolRateEstimateHz.load(std::memory_order_relaxed) / 1e6)
@@ -908,7 +900,7 @@ void Receiver::OperateViterbiManager(void)
             bool rawLockedPrev = RawSyncLocked.load(std::memory_order_relaxed);
             if (!(peakToMean > kPeakToMeanThr))
             {
-                if (displayPeriodSec_ > 0.0 && rawLockedPrev) {
+                if (rawLockedPrev) {
                     std::cout << "[RAW] \033[31mUNLOCKED\033[0m"
                               << " peakToMean=" << peakToMean
                               << " thr=" << kPeakToMeanThr
@@ -922,15 +914,15 @@ void Receiver::OperateViterbiManager(void)
             if (!rawLockedPrev) {
                 RawSyncLocked.store(true, std::memory_order_relaxed);
                 rawCorrDone = true;
-                if (displayPeriodSec_ > 0.0) {
-                    std::cout << "[RAW] \033[32mLOCKED\033[0m"
-                              << " peakToMean=" << peakToMean
-                              << " thr=" << kPeakToMeanThr
-                              << " peakAbs=" << bestMag
-                              << " phaseRad=" << std::atan2(bestIm, bestRe)
-                              << " lagSym=" << bestLag
-                              << std::endl;
-                }
+                
+                std::cout << "[RAW] \033[32mLOCKED\033[0m"
+                          << " peakToMean=" << peakToMean
+                          << " thr=" << kPeakToMeanThr
+                          << " peakAbs=" << bestMag
+                          << " phaseRad=" << std::atan2(bestIm, bestRe)
+                          << " lagSym=" << bestLag
+                          << std::endl;
+                
             } else {
                 RawSyncLocked.store(true, std::memory_order_relaxed);
                 rawCorrDone = true;
@@ -1265,14 +1257,13 @@ skip_raw:;
                             }
                             ViterbiSynchronized = true;
                             viterbiUnlockTimerStart = std::chrono::steady_clock::time_point::min();
-                            if (displayPeriodSec_ > 0.0)
-                            {
-                                std::cout << "[ViterbiSync] \033[32mLOCKED\033[0m"
-                                          << " thresh=" << ViterbiThreshold1
-                                          << " minMargin=(" << minMargin[0] << ", " << minMargin[1] << ", " << minMargin[2] << ")"
-                                          << " bestIndex=(" << BestIndex[0] << ", " << BestIndex[1] << ", " << BestIndex[2] << ")"
-                                          << std::endl;
-                            }
+                            
+                            std::cout << "[ViterbiSync] \033[32mLOCKED\033[0m"
+                                      << " thresh=" << ViterbiThreshold1
+                                      << " minMargin=(" << minMargin[0] << ", " << minMargin[1] << ", " << minMargin[2] << ")"
+                                      << " bestIndex=(" << BestIndex[0] << ", " << BestIndex[1] << ", " << BestIndex[2] << ")"
+                                      << std::endl;
+                            
                             prevViterbiLocked = true;
                             for(int i = 0; i < 3; i++)
                                 oViterbi[i].reset_decoder();
@@ -1295,10 +1286,11 @@ skip_raw:;
                     if (!ViterbiSynchronized) {
                         if (viterbiUnlockTimerStart == std::chrono::steady_clock::time_point::min()) {
                             viterbiUnlockTimerStart = now;
-                        } else if (std::chrono::duration<double>(now - viterbiUnlockTimerStart).count() > 2.0) {
-                            if (displayPeriodSec_ > 0.0) {
-                                std::cout << "[ViterbiSync] \033[31mACQUISITION TIMEOUT\033[0m Viterbi failed to lock after 2s. Forcing full unlock." << std::endl;
-                            }
+                        }
+                        if (std::chrono::duration<double>(now - viterbiUnlockTimerStart).count() > 2.0) {
+                            
+                            std::cout << "[ViterbiSync] \033[31mACQUISITION TIMEOUT\033[0m Viterbi failed to lock after 2s. Forcing full unlock." << std::endl;
+                            
                             timingTracking_.ForceUnlock();
                             phaseTrackingDD_.ForceUnlock();
                             SymbolRateDetected.store(false, std::memory_order_relaxed);
@@ -1307,9 +1299,9 @@ skip_raw:;
                             // Force CentralFreqEstimator to restart its estimation process
                             if (freqCorrector_.IsFreqReady()) {
                                 freqCorrector_.ForceEstimationRestart();
-                                if (displayPeriodSec_ > 0.0) {
-                                    std::cout << "[ViterbiSync] \033[31mACQUISITION TIMEOUT\033[0m -> Forcing CentralFreq to re-estimate." << std::endl;
-                                }
+                                
+                                std::cout << "[ViterbiSync] \033[31mACQUISITION TIMEOUT\033[0m -> Forcing CentralFreq to re-estimate." << std::endl;
+                                
                             }
                             
                             // Reset the timer to now, so it will trigger again in 2s if still not locked
@@ -1377,19 +1369,17 @@ skip_raw:;
                     
                     // Viterbi Unlock Condition
                     constexpr double kViterbiDesyncGrowthThr = 40.0; // Calibrated for Viterbi cliff (SNR ~1.9dB, BER jumping to >2e-1)
-                    if (CurrDebugStatistics.EmaMetricsGrowth > kViterbiDesyncGrowthThr && CurrDebugStatistics.NumBatches > 100)
-                    {
-                        ViterbiSynchronized = false;
-                        PRBSSynchronized = false;
-                        prbsHighBerStreak_ = 0;
-                        NumBitsAll = 0;
-                        NumErrorsAll = 0;
-                        
-                        if (displayPeriodSec_ > 0.0) {
+                        if (CurrDebugStatistics.EmaMetricsGrowth > kViterbiDesyncGrowthThr && CurrDebugStatistics.NumBatches > 100)
+                        {
+                            ViterbiSynchronized = false;
+                            PRBSSynchronized = false;
+                            prbsHighBerStreak_ = 0;
+                            NumBitsAll = 0;
+                            NumErrorsAll = 0;
+                            
                             std::cout << "[ViterbiSync] \033[31mDESYNC\033[0m EmaMetricsGrowth=" << CurrDebugStatistics.EmaMetricsGrowth << " > " << kViterbiDesyncGrowthThr << std::endl;
-                        }
-                        
-                        // Reset stats for next sync
+                            
+                            // Reset stats for next sync
                         CurrDebugStatistics.NumBatches = 0;
                         CurrDebugStatistics.SumMetricsGrowth = 0;
                         CurrDebugStatistics.MaxMetricsGrowth = 0;
@@ -1454,7 +1444,7 @@ skip_raw:;
                                 prbsHighBerStreak_ = 0;
                                 static auto lastPrbsLockMsg = std::chrono::steady_clock::time_point::min();
                                 const auto now = std::chrono::steady_clock::now();
-                                if (displayPeriodSec_ > 0.0 && std::chrono::duration<double>(now - lastPrbsLockMsg).count() > displayPeriodSec_)
+                                if (std::chrono::duration<double>(now - lastPrbsLockMsg).count() > displayPeriodSec_ || displayPeriodSec_ <= 0.0)
                                 {
                                     std::cout << "[PRBS] \033[32mLOCKED\033[0m"
                                               << " NumErrors=" << NumErrorsAtLock
@@ -1503,7 +1493,7 @@ skip_raw:;
                                     {
                                         static auto lastPrbsDesyncMsg = std::chrono::steady_clock::time_point::min();
                                         const auto now = std::chrono::steady_clock::now();
-                                        if (displayPeriodSec_ > 0.0 && std::chrono::duration<double>(now - lastPrbsDesyncMsg).count() > displayPeriodSec_) {
+                                        if (std::chrono::duration<double>(now - lastPrbsDesyncMsg).count() > displayPeriodSec_ || displayPeriodSec_ <= 0.0) {
                                             std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER sustained "
                                                       << kPrbsDesyncBadBatches << " batches (last "
                                                       << diffErrors << "/" << diffBits << ")" << std::endl;
