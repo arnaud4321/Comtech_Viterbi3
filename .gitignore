@@ -1,6 +1,8 @@
 build/*
 # Local MATLAB PLL tuning scripts (not part of the shipped tree)
 data/PLL*.m
+# Local AWGN / test run logs (not versioned)
+awgn*.txt
 __pycache__/
 *.pyc
 compile_commands.json

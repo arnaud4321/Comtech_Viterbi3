@@ -4,7 +4,7 @@
     "RollOff": 0.2,
     "FileName": "",
     "FreqHz": 868000000,
-    "GainDb":50.0,
+    "GainDb":39.0,
     "SampleRate": 21.42e6
   },
   "Receiver": {
@@ -37,8 +37,8 @@
       "UpdatePeriodSymbols": 64
     },
     "PhaseTracking": {
-      "Kp": 1.0e-3,
-      "Ki": 1.0e-5
+      "Kp": 1.33e-3,
+      "Ki": 3.5e-6
     },
     "ConstellationDisplay": {
       "PeriodSec": 1.0,
@@ -62,11 +62,11 @@
     "FrequencyShift": 50000,
     "ClockMismatchPpm": 1000,
     "CarrierToSymbolRateRatio": 100,
-    "AccelerationPeriod": 20.0,
-    "StablePeriod": 8.0
+    "AccelerationPeriod": 10.0,
+    "StablePeriod": 10.0
   },
   "Operation": {
-    "Mode": 3,
+    "Mode": 0,
     "ref": "internal"
   },
   "Simulation": {
@@ -74,10 +74,10 @@
     "NumErrors": 0,
     "Seed": 132345,
     "Debug": 0,
-    "DisplayPeriodSec": 0.0,
+    "DisplayPeriodSec": 1.0,
     "IqFileReplay": {
-      "Enable": true,
-      "Path": "/home/agueguen/Documents/Projets/Comtech_Viterbi3/data/InputRecording.bin",
+      "Enable": false,
+      "Path": "/home/agueguen/Documents/Projets/Comtech_Viterbi3/data/InputRecording3.bin",
       "Loop": false
     }
   }
