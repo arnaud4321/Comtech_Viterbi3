@@ -181,6 +181,17 @@ plt.show(block=False)
 plt.pause(0.001)
 raise_constellation_window()
 
+# Quit only when the user closes the window — not when stdin closes (Ctrl+C on C++, clean shutdown, EOF).
+_close_state = [False]
+
+
+def _on_figure_close(_evt):
+    _close_state[0] = True
+
+
+fig.canvas.mpl_connect("close_event", _on_figure_close)
+_feed_end_notified = [False]
+
 ax_ppm.set_title("Total PPM: applied vs estimated")
 ax_ppm.set_ylabel("ppm")
 ax_ppm.grid(True, alpha=0.3)
@@ -376,16 +387,20 @@ def _apply_frame_history(kv):
         pass
 
 
-while True:
+while not _close_state[0]:
     # Laisser Tk traiter les événements même sans nouvelles données
     plt.pause(0.02)
 
-    if stdin_closed:
+    if stdin_closed and not _feed_end_notified[0]:
+        _feed_end_notified[0] = True
         try:
-            plt.close(fig)
+            print(
+                "[constellation_display] Data feed ended (sim stopped or pipe closed). "
+                "Close the plot window to exit.",
+                file=sys.stderr,
+            )
         except Exception:
             pass
-        break
 
     try:
         while True:
@@ -421,13 +436,6 @@ while True:
                 _apply_frame_history(kv)
     except queue.Empty:
         pass
-
-    if stdin_closed:
-        try:
-            plt.close(fig)
-        except Exception:
-            pass
-        break
 
     # Throttled rendering (keeps GUI responsive without blocking the simulation).
     now = time.time()
@@ -589,5 +597,7 @@ while True:
         apply_limits()
         fig.canvas.draw_idle()
         fig.canvas.flush_events()
-
-plt.close(fig)
+    elif stdin_closed:
+        # Pipe fermé : plus de nouvelles trames, mais on garde la dernière image et la boucle Tk vivante.
+        fig.canvas.draw_idle()
+        fig.canvas.flush_events()

@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <string>
+#include <thread>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -182,8 +183,9 @@ public:
             if (!cfg_.XDisplay.empty())
                 setenv("DISPLAY", cfg_.XDisplay.c_str(), 1);
 
-            // Ctrl+C / SIGTERM in the terminal go to the foreground group; ignore here so only the
-            // parent handles shutdown and sends QUIT — matplotlib closes cleanly instead of a race.
+            // Ctrl+C in the terminal can hit the whole foreground group; ignore SIGINT here so the
+            // C++ app receives shutdown first and closes the pipe (Python then idles until the user
+            // closes the plot window). SIGTERM ignored so a mistaken kill does not tear down Tk first.
             signal(SIGINT, SIG_IGN);
             signal(SIGTERM, SIG_IGN);
 
@@ -224,21 +226,14 @@ public:
         }
         if (childPid_ > 0)
         {
-            int status = 0;
-            // Give the child a moment to exit cleanly.
-            for (int i = 0; i < 20; ++i)
-            {
-                pid_t r = waitpid(childPid_, &status, WNOHANG);
-                if (r == childPid_)
-                {
-                    childPid_ = -1;
-                    return;
-                }
-                usleep(10000);
-            }
-            kill(childPid_, SIGTERM);
-            waitpid(childPid_, &status, 0);
+            const pid_t pid = childPid_;
             childPid_ = -1;
+            // Child ignores SIGTERM; matplotlib stays open until the user closes the window.
+            // Reap in a detached thread so we do not block shutdown or leave a zombie.
+            std::thread([pid] {
+                int status = 0;
+                (void)::waitpid(pid, &status, 0);
+            }).detach();
         }
     }
 

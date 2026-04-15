@@ -41,6 +41,8 @@
 #include <cassert>
 #include <limits>
 #include <sys/stat.h>
+#include <cstdlib>
+#include <unistd.h>
 
 extern std::mutex mtxfilethr;
 
@@ -49,6 +51,25 @@ static void InjectPRBSErrorDeterministic(unsigned char* buf, int length);
 
 namespace
 {
+/** Audible / terminal alert on Viterbi metric desync (BEL + optional PulseAudio ding). */
+void viterbiDesyncAlert()
+{
+    const char bel = '\a';
+    (void)::write(STDOUT_FILENO, &bel, 1);
+    (void)::write(STDERR_FILENO, &bel, 1);
+    if (FILE* tty = std::fopen("/dev/tty", "w"))
+    {
+        (void)std::fputc(static_cast<unsigned char>(bel), tty);
+        (void)std::fflush(tty);
+        std::fclose(tty);
+    }
+    // Real sound on typical Ubuntu/Debian desktops (non-blocking). Ignored if paplay or files missing.
+    (void)std::system(
+        "command -v paplay >/dev/null 2>&1 && "
+        "{ paplay /usr/share/sounds/freedesktop/stereo/dialog-warning.oga 2>/dev/null || "
+        "paplay /usr/share/sounds/Yaru/stereo/dialog-warning.oga 2>/dev/null || "
+        "paplay /usr/share/sounds/alsa/Front_Center.wav 2>/dev/null; } >/dev/null 2>&1 &");
+}
 } // namespace
 
 Receiver::Receiver(/* args */):oBufferFilter(kRxRingFloatLen, kRxRingFloatExtra),OutputQ(LengthQueue)
@@ -1255,6 +1276,8 @@ skip_raw:;
                                 ViterbiParams.SignQ = 1;
                                 break;   
                             }
+                            if (!ViterbiSynchronized)
+                                viterbiRelockEvents_.fetch_add(1, std::memory_order_relaxed);
                             ViterbiSynchronized = true;
                             viterbiUnlockTimerStart = std::chrono::steady_clock::time_point::min();
                             
@@ -1371,12 +1394,15 @@ skip_raw:;
                     constexpr double kViterbiDesyncGrowthThr = 40.0; // Calibrated for Viterbi cliff (SNR ~1.9dB, BER jumping to >2e-1)
                         if (CurrDebugStatistics.EmaMetricsGrowth > kViterbiDesyncGrowthThr && CurrDebugStatistics.NumBatches > 100)
                         {
+                            if (ViterbiSynchronized)
+                                viterbiUnlockEvents_.fetch_add(1, std::memory_order_relaxed);
                             ViterbiSynchronized = false;
                             PRBSSynchronized = false;
                             prbsHighBerStreak_ = 0;
                             NumBitsAll = 0;
                             NumErrorsAll = 0;
                             
+                            viterbiDesyncAlert();
                             std::cout << "[ViterbiSync] \033[31mDESYNC\033[0m EmaMetricsGrowth=" << CurrDebugStatistics.EmaMetricsGrowth << " > " << kViterbiDesyncGrowthThr << std::endl;
                             
                             // Reset stats for next sync
@@ -1648,6 +1674,8 @@ RxStatistics Receiver::GetRxStatistics(double t_sim_optional) const
     s.phaseFreqHz = phaseTrackingDD_.GetLastFreqEstHz();
 
     s.isViterbiLocked = ViterbiSynchronized;
+    s.viterbiUnlockEvents = viterbiUnlockEvents_.load(std::memory_order_relaxed);
+    s.viterbiRelockEvents = viterbiRelockEvents_.load(std::memory_order_relaxed);
     s.isPrbsLocked = PRBSSynchronized;
 
     s.evmRms = phaseTrackingDD_.GetLastEvmRms();

@@ -220,6 +220,8 @@ int main(int argc, char* argv[])
 			     << " phaseLk=" << colorLk(stats.isPhaseLocked)
 			     << " phaseFreqHz=" << stats.phaseFreqHz
 			     << " vitLk=" << colorLk(stats.isViterbiLocked)
+			     << " vitUnlocks=" << stats.viterbiUnlockEvents
+			     << " vitRelocks=" << stats.viterbiRelockEvents
 			     << " prbsLk=" << colorLk(stats.isPrbsLocked)
 			     << " bits=" << stats.numBits
 			     << " errors=" << stats.numErrors
@@ -259,6 +261,8 @@ int main(int argc, char* argv[])
                   << " gardnerLk=" << colorLk(stats.isGardnerLocked)
                   << " phaseLk=" << colorLk(stats.isPhaseLocked)
                   << " vitLk=" << colorLk(stats.isViterbiLocked)
+                  << " vitUnlocks=" << stats.viterbiUnlockEvents
+                  << " vitRelocks=" << stats.viterbiRelockEvents
                   << " prbsLk=" << colorLk(stats.isPrbsLocked)
                   << " bits=" << stats.numBits
                   << " errors=" << stats.numErrors

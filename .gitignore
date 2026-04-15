@@ -1,4 +1,8 @@
 build/*
+# Local MATLAB PLL tuning scripts (not part of the shipped tree)
+data/PLL*.m
+__pycache__/
+*.pyc
 compile_commands.json
 *.bin
 bin/*

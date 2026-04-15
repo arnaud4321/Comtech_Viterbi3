@@ -119,6 +119,10 @@ struct RxStatistics {
     double phaseFreqHz;         ///< Fine residual frequency offset estimated by the DD-PLL (Hz).
     
     bool isViterbiLocked;       ///< True if the Viterbi decoder has synchronized to a hypothesis.
+    /// Number of times Viterbi went from locked to unlocked (e.g. metric-growth desync).
+    uint64_t viterbiUnlockEvents = 0;
+    /// Number of times Viterbi went from unlocked to locked (includes the initial acquisition).
+    uint64_t viterbiRelockEvents = 0;
     bool isPrbsLocked;          ///< True if the descrambled PRBS sequence is locked.
 
     double evmRms;              ///< Root Mean Square of the Error Vector Magnitude (EVM).
@@ -226,6 +230,8 @@ private:
     SimpleQueue OutputQ;
     // Protected by mtxQueues (all read/write must be done under lock).
     bool ViterbiSynchronized = false, PRBSSynchronized = false;
+    std::atomic<uint64_t> viterbiUnlockEvents_{0};
+    std::atomic<uint64_t> viterbiRelockEvents_{0};
     ViterbiParameters ViterbiParams;
     unsigned char *ViterbiOutputs[3];
     unsigned char *DiffDec[3];
