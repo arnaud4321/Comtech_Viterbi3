@@ -271,6 +271,19 @@ int GardnerTiming::ProcessBlock(const float* inI, const float* inQ, int inLen,
                   << " cumErr(sumOut-sumIn/2)=" << globalErr << std::endl;
     }
 #endif
+
+    // Keep absWrite_ and the interpolation time base tAbs_ in a moderate range so that
+    // (1) tAbs_ keeps enough fractional precision in double for Lagrange mu, and
+    // (2) indices passed to GetRingI stay safely within int range (it uses int masking).
+    // Subtracting one full ring length from both preserves (absIdx mod kRingSize) and
+    // all CanInterp inequalities; use a loop in case a single block pushes inLen large
+    // enough to cross more than one wrap boundary (unlikely with current callers).
+    while (absWrite_ >= 2LL * kRingSize)
+    {
+        absWrite_ -= static_cast<long long>(kRingSize);
+        tAbs_ -= static_cast<double>(kRingSize);
+    }
+
     return outCount;
 }
 

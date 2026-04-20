@@ -70,6 +70,9 @@ int main(int argc, char* argv[])
 	
 	std::signal(SIGINT, signal_handler);
 	std::signal(SIGTERM, signal_handler);
+	// Constellation (pipe vers Python) : si le lecteur ferme stdin (fenêtre fermée, crash matplotlib),
+	// les écritures suivantes envoient SIGPIPE (souvent exit 141). On ignore pour permettre un arrêt propre.
+	std::signal(SIGPIPE, SIG_IGN);
 
  	Params objParams;
     objParams.ReadParams(argv[1]);
@@ -222,6 +225,14 @@ int main(int argc, char* argv[])
 			     << " vitLk=" << colorLk(stats.isViterbiLocked)
 			     << " vitUnlocks=" << stats.viterbiUnlockEvents
 			     << " vitRelocks=" << stats.viterbiRelockEvents
+			     << " viterbiSurvivorRawCodedBitsCompared=" << stats.viterbiSurvivorRawCodedBitsCompared
+			     << " viterbiSurvivorRawCodedBitErrors=" << stats.viterbiSurvivorRawCodedBitErrors
+			     << " viterbiSurvivorRawCodedBer=" << std::scientific << std::setprecision(6)
+			     << stats.viterbiSurvivorRawCodedBer
+			     << std::defaultfloat
+			     << " viterbiSurvivorRawCodedSnrDb=" << std::fixed << std::setprecision(6)
+			     << stats.viterbiSurvivorRawCodedSnrDb
+			     << std::defaultfloat
 			     << " prbsLk=" << colorLk(stats.isPrbsLocked)
 			     << " bits=" << stats.numBits
 			     << " errors=" << stats.numErrors
@@ -263,6 +274,14 @@ int main(int argc, char* argv[])
                   << " vitLk=" << colorLk(stats.isViterbiLocked)
                   << " vitUnlocks=" << stats.viterbiUnlockEvents
                   << " vitRelocks=" << stats.viterbiRelockEvents
+                  << " viterbiSurvivorRawCodedBitsCompared=" << stats.viterbiSurvivorRawCodedBitsCompared
+                  << " viterbiSurvivorRawCodedBitErrors=" << stats.viterbiSurvivorRawCodedBitErrors
+                  << " viterbiSurvivorRawCodedBer=" << std::scientific << std::setprecision(6)
+                  << stats.viterbiSurvivorRawCodedBer
+                  << std::defaultfloat
+                  << " viterbiSurvivorRawCodedSnrDb=" << std::fixed << std::setprecision(6)
+                  << stats.viterbiSurvivorRawCodedSnrDb
+                  << std::defaultfloat
                   << " prbsLk=" << colorLk(stats.isPrbsLocked)
                   << " bits=" << stats.numBits
                   << " errors=" << stats.numErrors

@@ -43,8 +43,42 @@
 #include <sys/stat.h>
 #include <cstdlib>
 #include <unistd.h>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
+#include <string>
 
 extern std::mutex mtxfilethr;
+
+namespace
+{
+std::string formatIso8601LocalMs()
+{
+    using namespace std::chrono;
+    const auto now = system_clock::now();
+    const auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+    const std::time_t t = system_clock::to_time_t(now);
+    std::tm lt{};
+    localtime_r(&t, &lt);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &lt);
+    std::ostringstream oss;
+    oss << buf << '.' << std::setfill('0') << std::setw(3) << ms.count();
+    return oss.str();
+}
+} // namespace
+
+void Receiver::emitConstellationSyncEvent(const char* kind, double t_sim, double t_rate, const std::string& extraKvs)
+{
+    if (!constellationDisplay_)
+        return;
+    std::ostringstream oss;
+    oss << "EVENT kind=" << kind << " t_wall_iso=" << formatIso8601LocalMs() << " t_sim=" << std::fixed
+        << std::setprecision(6) << t_sim << " t_rate=" << std::setprecision(6) << t_rate;
+    if (!extraKvs.empty())
+        oss << ' ' << extraKvs;
+    constellationDisplay_->SendEventLine(oss.str());
+}
 
 // Forward declaration: used in OperateViterbiManager before the definition further below.
 static void InjectPRBSErrorDeterministic(unsigned char* buf, int length);
@@ -598,7 +632,24 @@ void Receiver::OperateViterbi(void *p)
             lk.unlock();
             
             oViterbi[IndexViterbi].Decode(SplitI[IndexViterbi]+PtrRd, SplitQ[IndexViterbi] + PtrRd, BatchSize1, ViterbiOutputs[IndexViterbi]+1, vp.ExchangeIQ, vp.SignI, vp.SignQ, VitSyncResults[IndexViterbi].Metrics[0]);
-            
+
+            if (IndexViterbi == 0)
+            {
+                viterbiSurvivorRawCodedBitErrors_.fetch_add(oViterbi[0].getLastSurvivorRawCodedBitErrors(),
+                                                            std::memory_order_relaxed);
+                viterbiSurvivorRawCodedBitsCompared_.fetch_add(oViterbi[0].getLastSurvivorRawCodedBitsTotal(),
+                                                               std::memory_order_relaxed);
+                
+                // Accumulate floating point sums safely
+                double sumRSq = oViterbi[0].getLastSurvivorRawCodedEvmSumRSq();
+                double currentSumRSq = viterbiSurvivorRawCodedEvmSumRSq_.load(std::memory_order_relaxed);
+                while (!viterbiSurvivorRawCodedEvmSumRSq_.compare_exchange_weak(currentSumRSq, currentSumRSq + sumRSq, std::memory_order_relaxed));
+
+                double sumRDotD = oViterbi[0].getLastSurvivorRawCodedEvmSumRDotD();
+                double currentSumRDotD = viterbiSurvivorRawCodedEvmSumRDotD_.load(std::memory_order_relaxed);
+                while (!viterbiSurvivorRawCodedEvmSumRDotD_.compare_exchange_weak(currentSumRDotD, currentSumRDotD + sumRDotD, std::memory_order_relaxed));
+            }
+
             lk.lock();
             CvViterbis2VitManager[IndexViterbi].wait(lk, [&] {
                 return StopAll || DecodedQ[IndexViterbi].AvailableWrite();
@@ -627,6 +678,10 @@ void Receiver::OperateViterbiManager(void)
 {
     NumBitsAll = 0;
     NumErrorsAll = 0;
+    viterbiSurvivorRawCodedBitErrors_.store(0, std::memory_order_relaxed);
+    viterbiSurvivorRawCodedBitsCompared_.store(0, std::memory_order_relaxed);
+    viterbiSurvivorRawCodedEvmSumRSq_.store(0.0, std::memory_order_relaxed);
+    viterbiSurvivorRawCodedEvmSumRDotD_.store(0.0, std::memory_order_relaxed);
     unsigned int PRBSSeed = 0;
     RawNumBitsAll = 0;
     RawNumErrorsAll = 0;
@@ -649,6 +704,13 @@ void Receiver::OperateViterbiManager(void)
     auto lastConstellationDisplay = std::chrono::steady_clock::now();
     uint64_t symbols_total = 0;
     const auto wall_start = std::chrono::steady_clock::now();
+    auto simRateSnapshot = [&]() -> std::pair<double, double> {
+        const double t_sim = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
+        const double symRateHz = SymbolRateEstimateHz.load(std::memory_order_relaxed);
+        const double rsDenom = (symRateHz > 1.0) ? symRateHz : SymbolRate;
+        const double t_rate = static_cast<double>(symbols_total) / rsDenom;
+        return {t_sim, t_rate};
+    };
 
     while (!StopAll)
     {
@@ -1113,7 +1175,34 @@ skip_raw:;
                 double evmRms = phaseTrackingDD_.GetLastEvmRms();
                 double snrFromEvmDb = (evmRms > 1e-12) ? (-20.0 * std::log10(evmRms)) : std::numeric_limits<double>::quiet_NaN();
 
-                char extra[768];
+                // Same EVM/SNR as GetRxStatistics (for constellation FRAME / Python plot).
+                double vitEvmRms = std::numeric_limits<double>::quiet_NaN();
+                double vitSnrDb = std::numeric_limits<double>::quiet_NaN();
+                {
+                    const uint64_t bitsCompared = viterbiSurvivorRawCodedBitsCompared_.load(std::memory_order_relaxed);
+                    const double sumRSqV = viterbiSurvivorRawCodedEvmSumRSq_.load(std::memory_order_relaxed);
+                    const double sumRDotDV = viterbiSurvivorRawCodedEvmSumRDotD_.load(std::memory_order_relaxed);
+                    if (bitsCompared > 0ULL && sumRDotDV > 1e-12) {
+                        const double Nsym = static_cast<double>(bitsCompared) / 2.0;
+                        const double sumDSq = 2.0 * Nsym;
+                        const double evmSq = (sumRSqV * sumDSq) / (sumRDotDV * sumRDotDV) - 1.0;
+                        if (evmSq > 0.0) {
+                            vitEvmRms = std::sqrt(evmSq);
+                            vitSnrDb = -10.0 * std::log10(evmSq);
+                        }
+                    }
+                }
+
+                double vitRawBer = std::numeric_limits<double>::quiet_NaN();
+                {
+                    const uint64_t vitBits = viterbiSurvivorRawCodedBitsCompared_.load(std::memory_order_relaxed);
+                    const uint64_t vitErrs = viterbiSurvivorRawCodedBitErrors_.load(std::memory_order_relaxed);
+                    if (vitBits > 0ULL) {
+                        vitRawBer = static_cast<double>(vitErrs) / static_cast<double>(vitBits);
+                    }
+                }
+
+                char extra[1024];
                 std::snprintf(extra, sizeof(extra),
                               "symRateMsps=%.6f symRatePpm=%.3f gardLocked=%d phaseLocked=%d vitLocked=%d prbsLocked=%d "
                               "symRateCorrPpm=%.3f gardnerPpm=%.3f rxTotalPpmCorr=%.3f "
@@ -1121,14 +1210,16 @@ skip_raw:;
                               "samplerMsps=%.3f rxFilterMsps=%.3f uhdOverflows=%llu "
                               "centralReady=%d centralTargetHz=%.3f centralNcoHz=%.3f gainDb=%.3f phaseFreqHz=%.3f "
                               "chanFreqHz=%.3f chanTotalPpm=%.6f chanGainDb=%.3f chanSeg=%d chanTRate=%.3f "
-                              "chanSnrDb=%.2f evmRms=%.6f snrFromEvmDb=%.2f",
+                              "chanSnrDb=%.2f evmRms=%.6f snrFromEvmDb=%.2f "
+                              "viterbiSurvivorRawCodedEvmRms=%.6f viterbiSurvivorRawCodedSnrDb=%.2f "
+                              "viterbiSurvivorRawCodedBer=%.6e",
                               symRateMsps, symRatePpm, gardLocked, phaseLocked, vitLocked, prbsLocked,
                               symRateCorrPpm, gardnerPpm, rxTotalPpmCorr,
                               numBits, numErrors, ber,
                               samplerMsps, rxFilterMsps, (unsigned long long)uhdOvf,
                               centralReady, centralTargetHz, centralNcoHz, gainDb, phaseFreqHz,
                               chanFreqHz, chanTotalPpm, chanGainDb, chanSeg, chanTRate, chanSnrDb, evmRms,
-                              snrFromEvmDb);
+                              snrFromEvmDb, vitEvmRms, vitSnrDb, vitRawBer);
 
                 constellationDisplay_->UpdateEx(pendingI, pendingQ, kSymFrame, t_sim, t_rate, std::string(extra));
                 lastConstellationDisplay = now;
@@ -1280,13 +1371,22 @@ skip_raw:;
                                 viterbiRelockEvents_.fetch_add(1, std::memory_order_relaxed);
                             ViterbiSynchronized = true;
                             viterbiUnlockTimerStart = std::chrono::steady_clock::time_point::min();
-                            
-                            std::cout << "[ViterbiSync] \033[32mLOCKED\033[0m"
-                                      << " thresh=" << ViterbiThreshold1
-                                      << " minMargin=(" << minMargin[0] << ", " << minMargin[1] << ", " << minMargin[2] << ")"
-                                      << " bestIndex=(" << BestIndex[0] << ", " << BestIndex[1] << ", " << BestIndex[2] << ")"
-                                      << std::endl;
-                            
+
+                            {
+                                const auto tr = simRateSnapshot();
+                                std::ostringstream ex;
+                                ex << std::fixed << std::setprecision(6) << "thresh=" << ViterbiThreshold1 << " minMargin0=" << minMargin[0]
+                                   << " minMargin1=" << minMargin[1] << " minMargin2=" << minMargin[2] << " bestIdx0=" << BestIndex[0]
+                                   << " bestIdx1=" << BestIndex[1] << " bestIdx2=" << BestIndex[2];
+                                emitConstellationSyncEvent("viterbi_lock", tr.first, tr.second, ex.str());
+                                std::cout << "[ViterbiSync] \033[32mLOCKED\033[0m t_wall=" << formatIso8601LocalMs()
+                                          << " t_sim=" << tr.first << "s"
+                                          << " thresh=" << ViterbiThreshold1
+                                          << " minMargin=(" << minMargin[0] << ", " << minMargin[1] << ", " << minMargin[2] << ")"
+                                          << " bestIndex=(" << BestIndex[0] << ", " << BestIndex[1] << ", " << BestIndex[2] << ")"
+                                          << std::endl;
+                            }
+
                             prevViterbiLocked = true;
                             for(int i = 0; i < 3; i++)
                                 oViterbi[i].reset_decoder();
@@ -1311,8 +1411,20 @@ skip_raw:;
                             viterbiUnlockTimerStart = now;
                         }
                         if (std::chrono::duration<double>(now - viterbiUnlockTimerStart).count() > 2.0) {
-                            
-                            std::cout << "[ViterbiSync] \033[31mACQUISITION TIMEOUT\033[0m Viterbi failed to lock after 2s. Forcing full unlock." << std::endl;
+                            {
+                                const auto tr = simRateSnapshot();
+                                const double omega = timingTracking_.GetGardnerOmega();
+                                const double omegaNom = timingTracking_.GetGardnerOmegaNom();
+                                const double gardnerPpm =
+                                    (omega > 1e-20 && omegaNom > 1e-20) ? ((omegaNom / omega) - 1.0) * 1.0e6 : 0.0;
+                                std::ostringstream ex;
+                                ex << std::fixed << std::setprecision(6) << "gardLocked=" << (timingTracking_.IsLocked() ? 1 : 0)
+                                   << " phaseLocked=" << (phaseTrackingDD_.IsLocked() ? 1 : 0) << " gardnerPpm=" << gardnerPpm;
+                                emitConstellationSyncEvent("viterbi_acq_timeout", tr.first, tr.second, ex.str());
+                                std::cout << "[ViterbiSync] \033[31mACQUISITION TIMEOUT\033[0m t_wall=" << formatIso8601LocalMs()
+                                          << " t_sim=" << tr.first << "s Viterbi failed to lock after 2s. Forcing full unlock."
+                                          << std::endl;
+                            }
                             
                             timingTracking_.ForceUnlock();
                             phaseTrackingDD_.ForceUnlock();
@@ -1391,7 +1503,7 @@ skip_raw:;
                     }
                     
                     // Viterbi Unlock Condition
-                    constexpr double kViterbiDesyncGrowthThr = 40.0; // Calibrated for Viterbi cliff (SNR ~1.9dB, BER jumping to >2e-1)
+                    constexpr double kViterbiDesyncGrowthThr = 45.0; // Calibrated for Viterbi cliff (SNR ~1.9dB, BER jumping to >2e-1)
                         if (CurrDebugStatistics.EmaMetricsGrowth > kViterbiDesyncGrowthThr && CurrDebugStatistics.NumBatches > 100)
                         {
                             if (ViterbiSynchronized)
@@ -1401,10 +1513,53 @@ skip_raw:;
                             prbsHighBerStreak_ = 0;
                             NumBitsAll = 0;
                             NumErrorsAll = 0;
-                            
+                            viterbiSurvivorRawCodedBitErrors_.store(0, std::memory_order_relaxed);
+                            viterbiSurvivorRawCodedBitsCompared_.store(0, std::memory_order_relaxed);
+                            viterbiSurvivorRawCodedEvmSumRSq_.store(0.0, std::memory_order_relaxed);
+                            viterbiSurvivorRawCodedEvmSumRDotD_.store(0.0, std::memory_order_relaxed);
+
                             viterbiDesyncAlert();
-                            std::cout << "[ViterbiSync] \033[31mDESYNC\033[0m EmaMetricsGrowth=" << CurrDebugStatistics.EmaMetricsGrowth << " > " << kViterbiDesyncGrowthThr << std::endl;
-                            
+                            {
+                                const auto tr = simRateSnapshot();
+                                const double omega = timingTracking_.GetGardnerOmega();
+                                const double omegaNom = timingTracking_.GetGardnerOmegaNom();
+                                const double gardnerPpm =
+                                    (omega > 1e-20 && omegaNom > 1e-20) ? ((omegaNom / omega) - 1.0) * 1.0e6 : 0.0;
+                                std::ostringstream ex;
+                                ex << std::fixed << std::setprecision(6) << "emaGrowth=" << CurrDebugStatistics.EmaMetricsGrowth
+                                   << " thr=" << kViterbiDesyncGrowthThr << " meanGrowth=" << CurrDebugStatistics.MeanMetricsGrowth
+                                   << " maxGrowth=" << CurrDebugStatistics.MaxMetricsGrowth << " numBatches=" << CurrDebugStatistics.NumBatches
+                                   << " gardLocked=" << (timingTracking_.IsLocked() ? 1 : 0)
+                                   << " phaseLocked=" << (phaseTrackingDD_.IsLocked() ? 1 : 0)
+                                   << " evmRms=" << phaseTrackingDD_.GetLastEvmRms()
+                                   << " phaseFreqHz=" << phaseTrackingDD_.GetLastFreqEstHz() << " gainDb=" << freqCorrector_.GetGainDb()
+                                   << " centralReady=" << (freqCorrector_.IsFreqReady() ? 1 : 0)
+                                   << " centralNcoHz=" << freqCorrector_.GetNcoHz()
+                                   << " symRateMsps=" << (SymbolRateEstimateHz.load(std::memory_order_relaxed) / 1e6)
+                                   << " gardnerPpm=" << gardnerPpm;
+                                if (pChannel_) {
+                                    ex << std::setprecision(2) << " chanSnrDb=" << pChannel_->GetCurrentApplied().SnrDb;
+                                }
+                                std::string hints = "vit_metric_ema_above_thr";
+                                if (!timingTracking_.IsLocked())
+                                    hints += ";gardner_unlocked";
+                                if (!phaseTrackingDD_.IsLocked())
+                                    hints += ";phase_unlocked";
+                                if (phaseTrackingDD_.GetLastEvmRms() > 0.55)
+                                    hints += ";high_evm_typical_low_snr";
+                                if (std::abs(gardnerPpm) > 150.0)
+                                    hints += ";large_gardner_ppm_residual";
+                                if (CurrDebugStatistics.EmaMetricsGrowth > kViterbiDesyncGrowthThr * 1.2)
+                                    hints += ";strong_branch_metric_divergence";
+                                if (!freqCorrector_.IsFreqReady())
+                                    hints += ";central_freq_not_ready";
+                                ex << " hints=" << hints;
+                                emitConstellationSyncEvent("viterbi_desync", tr.first, tr.second, ex.str());
+                                std::cout << "[ViterbiSync] \033[31mDESYNC\033[0m t_wall=" << formatIso8601LocalMs()
+                                          << " t_sim=" << tr.first << "s EmaMetricsGrowth=" << CurrDebugStatistics.EmaMetricsGrowth
+                                          << " > " << kViterbiDesyncGrowthThr << " | " << hints << std::endl;
+                            }
+
                             // Reset stats for next sync
                         CurrDebugStatistics.NumBatches = 0;
                         CurrDebugStatistics.SumMetricsGrowth = 0;
@@ -1472,7 +1627,12 @@ skip_raw:;
                                 const auto now = std::chrono::steady_clock::now();
                                 if (std::chrono::duration<double>(now - lastPrbsLockMsg).count() > displayPeriodSec_ || displayPeriodSec_ <= 0.0)
                                 {
-                                    std::cout << "[PRBS] \033[32mLOCKED\033[0m"
+                                    const auto tr = simRateSnapshot();
+                                    std::ostringstream ex;
+                                    ex << "numErrorsAtLock=" << NumErrorsAtLock << " thresh=" << PRBSThreshold << " ptrStart=" << PtrStart
+                                       << " seed=" << PRBSSeed;
+                                    emitConstellationSyncEvent("prbs_lock", tr.first, tr.second, ex.str());
+                                    std::cout << "[PRBS] \033[32mLOCKED\033[0m t_wall=" << formatIso8601LocalMs() << " t_sim=" << tr.first << "s"
                                               << " NumErrors=" << NumErrorsAtLock
                                               << " thresh=" << PRBSThreshold
                                               << " PtrStart=" << PtrStart
@@ -1520,9 +1680,18 @@ skip_raw:;
                                         static auto lastPrbsDesyncMsg = std::chrono::steady_clock::time_point::min();
                                         const auto now = std::chrono::steady_clock::now();
                                         if (std::chrono::duration<double>(now - lastPrbsDesyncMsg).count() > displayPeriodSec_ || displayPeriodSec_ <= 0.0) {
-                                            std::cout << "[PRBS] \033[31mDESYNC\033[0m High BER sustained "
-                                                      << kPrbsDesyncBadBatches << " batches (last "
-                                                      << diffErrors << "/" << diffBits << ")" << std::endl;
+                                            const auto tr = simRateSnapshot();
+                                            std::ostringstream ex;
+                                            ex << std::fixed << std::setprecision(6) << "berBatch=" << berBatch << " badBatches=" << kPrbsDesyncBadBatches
+                                               << " diffErrors=" << diffErrors << " diffBits=" << diffBits
+                                               << " vitLocked=" << (ViterbiSynchronized ? 1 : 0)
+                                               << " phaseLocked=" << (phaseTrackingDD_.IsLocked() ? 1 : 0)
+                                               << " gardLocked=" << (timingTracking_.IsLocked() ? 1 : 0);
+                                            ex << " hints=prbs_ber_above_thr;likely_burst_or_vit_slip";
+                                            emitConstellationSyncEvent("prbs_desync", tr.first, tr.second, ex.str());
+                                            std::cout << "[PRBS] \033[31mDESYNC\033[0m t_wall=" << formatIso8601LocalMs() << " t_sim=" << tr.first
+                                                      << "s High BER sustained " << kPrbsDesyncBadBatches << " batches (last " << diffErrors << "/"
+                                                      << diffBits << ")" << std::endl;
                                             lastPrbsDesyncMsg = now;
                                         }
                                         PRBSSynchronized = false;
@@ -1684,6 +1853,30 @@ RxStatistics Receiver::GetRxStatistics(double t_sim_optional) const
     s.numBits = NumBitsAll;
     s.numErrors = NumErrorsAll;
     s.ber = (s.numBits > 0) ? (static_cast<double>(s.numErrors) / static_cast<double>(s.numBits)) : 0.0;
+
+    s.viterbiSurvivorRawCodedBitErrors = viterbiSurvivorRawCodedBitErrors_.load(std::memory_order_relaxed);
+    s.viterbiSurvivorRawCodedBitsCompared = viterbiSurvivorRawCodedBitsCompared_.load(std::memory_order_relaxed);
+    s.viterbiSurvivorRawCodedBer =
+        (s.viterbiSurvivorRawCodedBitsCompared > 0ULL)
+            ? (static_cast<double>(s.viterbiSurvivorRawCodedBitErrors) /
+               static_cast<double>(s.viterbiSurvivorRawCodedBitsCompared))
+            : std::numeric_limits<double>::quiet_NaN();
+
+    double sumRSq = viterbiSurvivorRawCodedEvmSumRSq_.load(std::memory_order_relaxed);
+    double sumRDotD = viterbiSurvivorRawCodedEvmSumRDotD_.load(std::memory_order_relaxed);
+    // Data-aided EVM invariant to arbitrary LLR scaling (like AGC fluctuations):
+    // EVM^2 = (sum(|r|^2) * sum(|d|^2)) / (sum(r.d))^2 - 1.
+    // For QPSK mapped to +/-1, sum(|d|^2) = 2 * N. Here sumRDotD accumulates (ri*ideal_i + rq*ideal_q),
+    // and sumRSq accumulates (ri^2 + rq^2). Total symbols N = viterbiSurvivorRawCodedBitsCompared / 2.
+    if (s.viterbiSurvivorRawCodedBitsCompared > 0ULL && sumRDotD > 1e-12) {
+        double N = static_cast<double>(s.viterbiSurvivorRawCodedBitsCompared) / 2.0;
+        double sumDSq = 2.0 * N;
+        double evmSq = (sumRSq * sumDSq) / (sumRDotD * sumRDotD) - 1.0;
+        if (evmSq > 0.0) {
+            s.viterbiSurvivorRawCodedEvmRms = std::sqrt(evmSq);
+            s.viterbiSurvivorRawCodedSnrDb = -10.0 * std::log10(evmSq);
+        }
+    }
 
     return s;
 }

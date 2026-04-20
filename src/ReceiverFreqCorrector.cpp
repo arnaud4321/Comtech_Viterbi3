@@ -295,6 +295,46 @@ void ReceiverFreqCorrector::ThreadMain()
         {
             pwrEma_ = cfg_.PowerEmaAlpha * p + (1.0 - cfg_.PowerEmaAlpha) * pwrEma_;
         }
+
+        // --- POWER ANOMALY DETECTION ---
+#define ENABLE_RF_ANOMALY_DETECTION 0
+#ifdef ENABLE_RF_ANOMALY_DETECTION
+        // Detect sudden changes in input power (e.g., RF interference burst or deep fade)
+        // by comparing instantaneous chunk power against the established AGC EMA.
+        // We only start detecting after the EMA is somewhat initialized (>1e-10) to avoid startup noise.
+        if (pwrEma_ > 1e-10)
+        {
+            const double ratio = p / pwrEma_;
+            
+            // Burst threshold: Instantaneous power is > 4.0x the moving average (approx +6 dB)
+            if (ratio > 1.5)
+            {
+                const double t_rate = static_cast<double>(samplesTotal_) / SamplingFrequency;
+                const double t_sim = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
+                std::cout << "[CentralFreq] \033[1;33mRF BURST DETECTED\033[0m"
+                          << " t_sim=" << t_sim << " s"
+                          << " t_rate=" << t_rate << " s"
+                          << " P_inst/P_ema=" << ratio << "x (" << 10.0 * std::log10(ratio) << " dB)"
+                          << " gainDb=" << gainDb_.load(std::memory_order_relaxed)
+                          << " (Possible Viterbi desync imminent)"
+                          << std::endl;
+            }
+            // Deep fade threshold: Instantaneous power drops < 0.1x the moving average (approx -10 dB)
+            else if (ratio < 0.75 && pwrEma_ > 1e-6) // Require some absolute power to call it a deep fade
+            {
+                const double t_rate = static_cast<double>(samplesTotal_) / SamplingFrequency;
+                const double t_sim = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
+                std::cout << "[CentralFreq] \033[1;35mDEEP FADE DETECTED\033[0m"
+                          << " t_sim=" << t_sim << " s"
+                          << " t_rate=" << t_rate << " s"
+                          << " P_inst/P_ema=" << ratio << "x (" << 10.0 * std::log10(ratio) << " dB)"
+                          << " gainDb=" << gainDb_.load(std::memory_order_relaxed)
+                          << std::endl;
+            }
+        }
+#endif
+        // -------------------------------
+
         const double gain = (pwrEma_ > 1e-20 && pwrRef_ > 1e-20) ? std::sqrt(pwrRef_ / pwrEma_) : 1.0;
         gainDb_.store(20.0 * std::log10(std::max(1e-20, gain)), std::memory_order_relaxed);
 

@@ -216,6 +216,15 @@ public:
         return true;
     }
 
+    /** @brief One-line protocol for Python: @c EVENT key=value ... (no IQ payload). */
+    void SendEventLine(const std::string& line)
+    {
+        if (fdWrite_ < 0 || line.empty())
+            return;
+        if (dprintf(fdWrite_, "%s\n", line.c_str()) < 0)
+            Stop();
+    }
+
     void Stop()
     {
         if (fdWrite_ >= 0)

@@ -223,6 +223,64 @@ void Viterbi::traceback_mid( unsigned char *Out, int BestMetInd, int Length)
 
 }
 
+uint64_t Viterbi::count_survivor_raw_coded_bit_errors(float *InputI, float *InputQ, unsigned int Length,
+                                                    float SignI, float SignQ, int BestMetInd, double &sum_r_sq, double &sum_r_dot_d)
+{
+	// Same buffers as CalcMetrics2 (Decode already set pInputI/pInputQ after optional IQ swap). Do not apply ExchangeIQ again.
+	float *const pI = InputI;
+	float *const pQ = InputQ;
+
+	int rdRow = static_cast<int>((intSurvMemWrRowAddr - 1u) & MaskSurv);
+	int rdCol = BestMetInd;
+
+	// We do NOT skip FirstTracebackPeriod here.
+	// InputI and InputQ passed to this function are the *current* symbols (time t to t+Length-1),
+	// so they align perfectly with the last `Length` rows written to the survivor memory.
+	// (If we skipped FirstTracebackPeriod, we would be comparing decisions from time t-64
+	// against symbols from time t).
+
+	uint64_t errors = 0;
+	double sumRsq = 0.0;
+	double sumRdotD = 0.0;
+
+	for (int i = static_cast<int>(Length) - 1; i >= 0; i--)
+	{
+		uint64_t AllDecisions = bmatSurvMem[rdRow];
+		AllDecisions = AllDecisions >> rdCol;
+		unsigned int NewDecision = static_cast<unsigned int>(AllDecisions & 1ull);
+
+		const int S_after = rdCol;
+		const int tr = imatDecodingTable[(S_after << 1) | static_cast<int>(NewDecision)];
+		// imatDecodingTable packs outputs for ivecGenPolys[0]=0171 then [1]=0133 as (MSB, LSB) = (branch A, branch B).
+		// CalcMetrics2 uses A=InputI, B=InputQ — same pointers as passed here.
+		const int eb_hi = (tr >> 1) & 1;
+		const int eb_lo = tr & 1;
+
+		const float ri = pI[static_cast<unsigned>(i)] * SignI;
+		const float rq = pQ[static_cast<unsigned>(i)] * SignQ;
+		// Match Transmitter Map[0]=-1, Map[1]=+1: bit 1 => positive branch.
+		const int rb_i = (ri >= 0.f) ? 1 : 0;
+		const int rb_q = (rq >= 0.f) ? 1 : 0;
+		errors += static_cast<uint64_t>((eb_hi != rb_i) + (eb_lo != rb_q));
+
+		// Estimate data-aided amplitude-invariant EVM:
+		// Map back to ideal transmitted values:
+		const float ideal_i = (eb_hi == 1) ? 1.0f : -1.0f;
+		const float ideal_q = (eb_lo == 1) ? 1.0f : -1.0f;
+		
+		sumRsq += static_cast<double>(ri * ri + rq * rq);
+		sumRdotD += static_cast<double>(ri * ideal_i + rq * ideal_q);
+
+		rdCol = ((rdCol << 1) & static_cast<int>(intMask)) | static_cast<int>(NewDecision);
+		rdRow--;
+		rdRow &= static_cast<int>(MaskSurv);
+	}
+	
+	sum_r_sq = sumRsq;
+	sum_r_dot_d = sumRdotD;
+	return errors;
+}
+
 
 void Viterbi::generate_binvecs(void)
 {
@@ -344,6 +402,13 @@ void Viterbi::Decode(float *InputI, float *InputQ, unsigned int InputLength, uns
 	}
 
 	traceback_mid(Output, BestIndex, InputLength);
+
+	double sum_r_sq = 0.0, sum_r_dot_d = 0.0;
+	lastSurvivorRawCodedBitErrors_ =
+	    count_survivor_raw_coded_bit_errors(pInputI, pInputQ, InputLength, SignI, SignQ, BestIndex, sum_r_sq, sum_r_dot_d);
+	lastSurvivorRawCodedBitsTotal_ = static_cast<uint64_t>(InputLength) * 2u;
+	lastSurvivorRawCodedEvmSumRSq_ = sum_r_sq;
+	lastSurvivorRawCodedEvmSumRDotD_ = sum_r_dot_d;
 
 	MetricsGrowth = BestMetric2;
 	NumBits += InputLength;
@@ -814,6 +879,8 @@ void Viterbi::reset_decoder(void)
 {
 	//reset the number of decoded bits
 	NumBits = 0;
+	lastSurvivorRawCodedBitErrors_ = 0;
+	lastSurvivorRawCodedBitsTotal_ = 0;
 
 	//reset the Survivor Row Address Pointers
 	intSurvMemWrRowAddr = 0;

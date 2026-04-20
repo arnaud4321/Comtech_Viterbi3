@@ -4,12 +4,12 @@
     "RollOff": 0.2,
     "FileName": "",
     "FreqHz": 868000000,
-    "GainDb":39.0,
-    "SampleRate": 21.42e6
+    "GainDb":38.0,
+    "SampleRate": 5.42e6
   },
   "Receiver": {
     "FreqHz": 868010000,
-    "SampleRate": 21.42e6,
+    "SampleRate": 5.42e6,
     "CentralFrequency": {
       "Enable": 1,
       "EstimationBlockSamples": 65536,
@@ -54,19 +54,19 @@
     }
   },
   "Channel": {
-    "Esn0": 20.0,
+    "Esn0": 3.7,
     "InitialRangeDb": 0.0,
-    "DynamicRangeDb": -20.0,
+    "DynamicRangeDb": 0.0,
     "ApplyGainBeforeNoise": true,
     "InitialFrequencyShift": 50000,
-    "FrequencyShift": 50000,
+    "FrequencyShift": 0,
     "ClockMismatchPpm": 1000,
     "CarrierToSymbolRateRatio": 100,
-    "AccelerationPeriod": 10.0,
-    "StablePeriod": 10.0
+    "AccelerationPeriod": 0.0,
+    "StablePeriod": 200000.0
   },
   "Operation": {
-    "Mode": 0,
+    "Mode": 3,
     "ref": "internal"
   },
   "Simulation": {
@@ -74,7 +74,7 @@
     "NumErrors": 0,
     "Seed": 132345,
     "Debug": 0,
-    "DisplayPeriodSec": 1.0,
+    "DisplayPeriodSec": 60.0,
     "IqFileReplay": {
       "Enable": false,
       "Path": "/home/agueguen/Documents/Projets/Comtech_Viterbi3/data/InputRecording3.bin",

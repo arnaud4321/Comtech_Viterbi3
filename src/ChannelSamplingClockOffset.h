@@ -30,6 +30,10 @@
  * Each output uses Lagrange-4 at @c tScoAbs (@ref Lagrange4Simd, AVX in the hot loop); if the cursor leaves a safe band inside the ring,
  * the lag state is dropped until warmup completes again.
  *
+ * **Long runs (weeks / months):** @c absWrite and @c tScoAbs are periodically reduced by one full ring length
+ * (@c kSize, power of two) so @c double fractional precision for Lagrange @c mu stays adequate and ring
+ * indices stay well inside @c int range for masking — same idea as @c GardnerTiming wrap.
+ *
  * **Output:** @c FloatBatchToShortsInterleaved applies @c lrintf and clamps to int16; results go to the shared
  * @c BufferShort like the rest of the channel. Distinct from Gardner recovery, which acts on **symbol**
  * timing after matched filtering in @ref Receiver.
@@ -75,6 +79,10 @@ private:
         float GetQ(long long absIdx) const;
         float InterpLagrange4I(double t) const;
         float InterpLagrange4Q(double t) const;
+
+        /// Periodically subtract @c kSize from @c absWrite and, when @a tCursor is non-null, from @a *tCursor
+        /// so absolute sample time stays bounded during multi-week / multi-month runs (double ULP, int mask).
+        void RewrapForLongRun(double* tCursor);
     };
 
     double totalPpm_ = 0.0;

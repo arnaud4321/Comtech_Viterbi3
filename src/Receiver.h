@@ -6,6 +6,7 @@
 #include "SimpleQueue.h"
 #include "definitions.h"
 #include <cstdint>
+#include <limits>
 #include <thread>
 #include "Sampler.h"
 #include "definitions.h"
@@ -28,6 +29,7 @@
 #include "Transmitter.h"
 #include <memory>
 #include <atomic>
+#include <string>
 using namespace std;
 //#define DEBUG1
 //#define DEBUG2
@@ -131,6 +133,18 @@ struct RxStatistics {
     uint64_t numBits;           ///< Total number of PRBS bits compared.
     uint64_t numErrors;         ///< Total number of PRBS bit errors.
     double ber;                 ///< Current Bit Error Rate (BER) over the whole history since lock.
+
+    /// Coded bits compared along the Viterbi survivor path vs hard I/Q (2 bits per symbol per decode).
+    uint64_t viterbiSurvivorRawCodedBitsCompared = 0;
+    /// Bit errors on that survivor-path estimate (channel hard decisions vs trellis branch labels).
+    uint64_t viterbiSurvivorRawCodedBitErrors = 0;
+    /// @f$\mathrm{viterbiSurvivorRawCodedBitErrors}/\mathrm{viterbiSurvivorRawCodedBitsCompared}@f$; NaN if none.
+    double viterbiSurvivorRawCodedBer = std::numeric_limits<double>::quiet_NaN();
+    
+    /// RMS EVM based on the comparison of received LLRs with decoded ideal survivor path symbols.
+    double viterbiSurvivorRawCodedEvmRms = std::numeric_limits<double>::quiet_NaN();
+    /// Estimated SNR derived from the survivor path EVM RMS (dB).
+    double viterbiSurvivorRawCodedSnrDb = std::numeric_limits<double>::quiet_NaN();
 };
 
 /**
@@ -224,6 +238,8 @@ private:
 
     void Split3(float *InputI, float *InputQ, int Length, int PtrWr);
     void TakeEvenDebug(float *Input, float *Output, int Length);
+    /** @brief Wall clock + @a t_sim / @a t_rate and optional @a extraKvs to constellation child (@c EVENT line). */
+    void emitConstellationSyncEvent(const char* kind, double t_sim, double t_rate, const std::string& extraKvs = {});
     static constexpr int LengthQueue = 32;
     SimpleQueue DecodedQ[3] = {SimpleQueue(LengthQueue),SimpleQueue(LengthQueue),SimpleQueue(LengthQueue)};
     SimpleQueue DemodulatorQ[3] = {SimpleQueue(LengthQueue),SimpleQueue(LengthQueue),SimpleQueue(LengthQueue)};
@@ -232,6 +248,10 @@ private:
     bool ViterbiSynchronized = false, PRBSSynchronized = false;
     std::atomic<uint64_t> viterbiUnlockEvents_{0};
     std::atomic<uint64_t> viterbiRelockEvents_{0};
+    std::atomic<uint64_t> viterbiSurvivorRawCodedBitErrors_{0};
+    std::atomic<uint64_t> viterbiSurvivorRawCodedBitsCompared_{0};
+    std::atomic<double> viterbiSurvivorRawCodedEvmSumRSq_{0.0};
+    std::atomic<double> viterbiSurvivorRawCodedEvmSumRDotD_{0.0};
     ViterbiParameters ViterbiParams;
     unsigned char *ViterbiOutputs[3];
     unsigned char *DiffDec[3];

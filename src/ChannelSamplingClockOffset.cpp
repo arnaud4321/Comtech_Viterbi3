@@ -6,6 +6,9 @@
  * queue. **ThreadMain** — Ring + @c tScoAbs with @c step = @f$1/(1+\varepsilon)@f$, Lagrange-4 outputs,
  * latency warmup, safe-band checks, then @c FloatBatchToShortsInterleaved → @c BufferShort.
  * **Configure/UpdateTotalPpm** — Set @f$\varepsilon@f$ and the atomic @c step_.
+ *
+ * Simulations may run for weeks or months; @ref ScoRingBuffer::RewrapForLongRun keeps absolute indices and
+ * the Lagrange time cursor in a moderate range (see header).
  */
 
 #include "ChannelSamplingClockOffset.h"
@@ -24,8 +27,9 @@ void ChannelSamplingClockOffset::ScoRingBuffer::PushBlock(const float* inI, cons
     for (int i = 0; i < n; ++i)
     {
         const long long a = absWrite + static_cast<long long>(i);
-        ringI[static_cast<int>(a) & kMask] = inI[i];
-        ringQ[static_cast<int>(a) & kMask] = inQ[i];
+        const size_t idx = static_cast<size_t>(a) & static_cast<size_t>(kMask);
+        ringI[idx] = inI[i];
+        ringQ[idx] = inQ[i];
     }
     absWrite += static_cast<long long>(n);
 }
@@ -37,12 +41,24 @@ long long ChannelSamplingClockOffset::ScoRingBuffer::OldestAbs() const
 
 float ChannelSamplingClockOffset::ScoRingBuffer::GetI(long long absIdx) const
 {
-    return ringI[static_cast<int>(absIdx) & kMask];
+    return ringI[static_cast<size_t>(absIdx) & static_cast<size_t>(kMask)];
 }
 
 float ChannelSamplingClockOffset::ScoRingBuffer::GetQ(long long absIdx) const
 {
-    return ringQ[static_cast<int>(absIdx) & kMask];
+    return ringQ[static_cast<size_t>(absIdx) & static_cast<size_t>(kMask)];
+}
+
+void ChannelSamplingClockOffset::ScoRingBuffer::RewrapForLongRun(double* tCursor)
+{
+    // Keep absWrite and the Lagrange time base small: double ULP on fractional mu, safe indexing via mask.
+    // Subtracting one full ring length preserves (index mod kSize) for live samples (kSize is power of 2).
+    while (absWrite >= 2LL * static_cast<long long>(kSize))
+    {
+        absWrite -= static_cast<long long>(kSize);
+        if (tCursor != nullptr)
+            *tCursor -= static_cast<double>(kSize);
+    }
 }
 
 float ChannelSamplingClockOffset::ScoRingBuffer::InterpLagrange4I(double t) const
@@ -263,6 +279,9 @@ void ChannelSamplingClockOffset::ThreadMain()
                 }
             }
         }
+
+        // Multi-week / multi-month runs: bound absWrite and tScoAbs (when active) without changing ring physics.
+        scoRing.RewrapForLongRun(scoInit ? &tScoAbs : nullptr);
 
         if (scoOutLen <= 0 || pOutBuf_ == nullptr || pOutMtx_ == nullptr)
             continue;

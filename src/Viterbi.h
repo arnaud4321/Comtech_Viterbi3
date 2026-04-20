@@ -85,6 +85,14 @@ protected:
 
 	//void AcsAll(unsigned int BranchMet, __int64 *Decisions);
 	void traceback_mid( unsigned char *Out, int BestMetInd, int Length);
+	/// Coded-bit errors vs hard I/Q for the ML survivor path (same walk as @c traceback_mid).
+	/// @a InputI / @a InputQ are decoder axes A/B, identical to @c CalcMetrics2 (already @c ExchangeIQ-adjusted by @c Decode).
+	double lastSurvivorRawCodedEvmSumRSq_ = 0.0;
+	double lastSurvivorRawCodedEvmSumRDotD_ = 0.0;
+
+	uint64_t count_survivor_raw_coded_bit_errors(float *InputI, float *InputQ, unsigned int Length,
+	                                             float SignI, float SignQ, int BestMetInd, double &errSqSum, double &magSqSum);
+
 	void CalcMetrics2(float *Input, unsigned int InputLength);
 
 
@@ -95,6 +103,8 @@ protected:
 	bool ReversedPoly;
 	int DecoderID;
 	uint64_t NumBits = 0;
+	uint64_t lastSurvivorRawCodedBitErrors_ = 0;
+	uint64_t lastSurvivorRawCodedBitsTotal_ = 0;
 	public:
 	Viterbi(int Idx);
 	//GenPolysInp - vector containing the Generator Polynomials
@@ -109,6 +119,13 @@ protected:
 	void Decode(float *InputI, float *InputQ, unsigned int InputLength, unsigned char *Output, bool ExchangeIQ, float SignI, float SignQ, float &MetricsGrowth);
 	void reset_decoder(void);
 
+	/// Last @c Decode: coded-bit errors on survivor path vs hard-sliced I/Q (2 bits per symbol).
+	uint64_t getLastSurvivorRawCodedBitErrors() const { return lastSurvivorRawCodedBitErrors_; }
+	/// Total coded bits compared for that decode (= 2 * InputLength symbols).
+	uint64_t getLastSurvivorRawCodedBitsTotal() const { return lastSurvivorRawCodedBitsTotal_; }
+
+	double getLastSurvivorRawCodedEvmSumRSq() const { return lastSurvivorRawCodedEvmSumRSq_; }
+	double getLastSurvivorRawCodedEvmSumRDotD() const { return lastSurvivorRawCodedEvmSumRDotD_; }
 
 };
 
