@@ -135,7 +135,8 @@ int main(int argc, char* argv[])
 		oRx->SetChannel(oAWGN);
 		oRx->SetTransmitter(oTx);
 		oRx->StartThreads(objParams.RollOff, objParams.TxMode, objParams.SymRateCfg, objParams.TimingTrackingCfg,
-		                  objParams.DisplayPeriodSec, objParams.CentralFreqCfg, objParams.PhaseTrackingCfg, objParams.ConstellationCfg);
+		                  objParams.DisplayPeriodSec, objParams.CentralFreqCfg, objParams.PhaseTrackingCfg,
+		                  objParams.ConstellationCfg, objParams.ViterbiSurvivorEvmEmaAlpha);
 	}
 	
 	auto Start = std::chrono::high_resolution_clock::now();

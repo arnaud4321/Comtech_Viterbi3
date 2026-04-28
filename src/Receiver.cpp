@@ -66,6 +66,17 @@ std::string formatIso8601LocalMs()
     oss << buf << '.' << std::setfill('0') << std::setw(3) << ms.count();
     return oss.str();
 }
+
+/** Data-aided @f$\mathrm{EVM}^2@f$ for one decoded batch (same formula as before; no cross-batch accumulation). */
+double survivorBatchEvmSq(double sumRSq, double sumRDotD, uint64_t bitsCompared)
+{
+    if (bitsCompared == 0ULL || sumRDotD <= 1e-12)
+        return std::numeric_limits<double>::quiet_NaN();
+    const double N = static_cast<double>(bitsCompared) / 2.0;
+    const double sumDSq = 2.0 * N;
+    const double evmSq = (sumRSq * sumDSq) / (sumRDotD * sumRDotD) - 1.0;
+    return (evmSq > 0.0) ? evmSq : std::numeric_limits<double>::quiet_NaN();
+}
 } // namespace
 
 void Receiver::emitConstellationSyncEvent(const char* kind, double t_sim, double t_rate, const std::string& extraKvs)
@@ -166,12 +177,15 @@ void Receiver::StartThreads(double RollOff, TxModes RxModeIn,
                             double displayPeriodSec,
                             const ReceiverFreqCorrectorConfig& centralFreqCfg,
                             const PhaseTrackingConfig& phaseCfg,
-                            const ConstellationDisplayConfig& constellationCfg)
+                            const ConstellationDisplayConfig& constellationCfg,
+                            double viterbiSurvivorEvmEmaAlpha)
 {
     StopAll = false;
     RxMode = RxModeIn;
     displayPeriodSec_ = displayPeriodSec;
     constellationCfg_ = constellationCfg;
+    viterbiSurvivorEvmEmaAlpha_ =
+        (viterbiSurvivorEvmEmaAlpha > 0.0 && viterbiSurvivorEvmEmaAlpha <= 1.0) ? viterbiSurvivorEvmEmaAlpha : 0.05;
     // Keep measure cadence at >= 1 s when console is off: short PeriodSec (e.g. 0.5) was tied here and
     // differed from DisplayPeriodSec==1 runs (see sampler tpm in main.cpp too).
     rxThroughputMeasurePeriodSec_ =
@@ -639,15 +653,16 @@ void Receiver::OperateViterbi(void *p)
                                                             std::memory_order_relaxed);
                 viterbiSurvivorRawCodedBitsCompared_.fetch_add(oViterbi[0].getLastSurvivorRawCodedBitsTotal(),
                                                                std::memory_order_relaxed);
-                
-                // Accumulate floating point sums safely
-                double sumRSq = oViterbi[0].getLastSurvivorRawCodedEvmSumRSq();
-                double currentSumRSq = viterbiSurvivorRawCodedEvmSumRSq_.load(std::memory_order_relaxed);
-                while (!viterbiSurvivorRawCodedEvmSumRSq_.compare_exchange_weak(currentSumRSq, currentSumRSq + sumRSq, std::memory_order_relaxed));
-
-                double sumRDotD = oViterbi[0].getLastSurvivorRawCodedEvmSumRDotD();
-                double currentSumRDotD = viterbiSurvivorRawCodedEvmSumRDotD_.load(std::memory_order_relaxed);
-                while (!viterbiSurvivorRawCodedEvmSumRDotD_.compare_exchange_weak(currentSumRDotD, currentSumRDotD + sumRDotD, std::memory_order_relaxed));
+                const uint64_t bitsBatch = oViterbi[0].getLastSurvivorRawCodedBitsTotal();
+                const double sumRSq = oViterbi[0].getLastSurvivorRawCodedEvmSumRSq();
+                const double sumRDotD = oViterbi[0].getLastSurvivorRawCodedEvmSumRDotD();
+                const double evmSqBatch = survivorBatchEvmSq(sumRSq, sumRDotD, bitsBatch);
+                if (std::isfinite(evmSqBatch)) {
+                    const double a = viterbiSurvivorEvmEmaAlpha_;
+                    const double prev = viterbiSurvivorRawCodedEvmSqEma_.load(std::memory_order_relaxed);
+                    const double next = std::isnan(prev) ? evmSqBatch : (a * evmSqBatch + (1.0 - a) * prev);
+                    viterbiSurvivorRawCodedEvmSqEma_.store(next, std::memory_order_relaxed);
+                }
             }
 
             lk.lock();
@@ -680,8 +695,7 @@ void Receiver::OperateViterbiManager(void)
     NumErrorsAll = 0;
     viterbiSurvivorRawCodedBitErrors_.store(0, std::memory_order_relaxed);
     viterbiSurvivorRawCodedBitsCompared_.store(0, std::memory_order_relaxed);
-    viterbiSurvivorRawCodedEvmSumRSq_.store(0.0, std::memory_order_relaxed);
-    viterbiSurvivorRawCodedEvmSumRDotD_.store(0.0, std::memory_order_relaxed);
+    viterbiSurvivorRawCodedEvmSqEma_.store(std::numeric_limits<double>::quiet_NaN(), std::memory_order_relaxed);
     unsigned int PRBSSeed = 0;
     RawNumBitsAll = 0;
     RawNumErrorsAll = 0;
@@ -1179,17 +1193,10 @@ skip_raw:;
                 double vitEvmRms = std::numeric_limits<double>::quiet_NaN();
                 double vitSnrDb = std::numeric_limits<double>::quiet_NaN();
                 {
-                    const uint64_t bitsCompared = viterbiSurvivorRawCodedBitsCompared_.load(std::memory_order_relaxed);
-                    const double sumRSqV = viterbiSurvivorRawCodedEvmSumRSq_.load(std::memory_order_relaxed);
-                    const double sumRDotDV = viterbiSurvivorRawCodedEvmSumRDotD_.load(std::memory_order_relaxed);
-                    if (bitsCompared > 0ULL && sumRDotDV > 1e-12) {
-                        const double Nsym = static_cast<double>(bitsCompared) / 2.0;
-                        const double sumDSq = 2.0 * Nsym;
-                        const double evmSq = (sumRSqV * sumDSq) / (sumRDotDV * sumRDotDV) - 1.0;
-                        if (evmSq > 0.0) {
-                            vitEvmRms = std::sqrt(evmSq);
-                            vitSnrDb = -10.0 * std::log10(evmSq);
-                        }
+                    const double evmSq = viterbiSurvivorRawCodedEvmSqEma_.load(std::memory_order_relaxed);
+                    if (std::isfinite(evmSq) && evmSq > 0.0) {
+                        vitEvmRms = std::sqrt(evmSq);
+                        vitSnrDb = -10.0 * std::log10(evmSq);
                     }
                 }
 
@@ -1515,8 +1522,8 @@ skip_raw:;
                             NumErrorsAll = 0;
                             viterbiSurvivorRawCodedBitErrors_.store(0, std::memory_order_relaxed);
                             viterbiSurvivorRawCodedBitsCompared_.store(0, std::memory_order_relaxed);
-                            viterbiSurvivorRawCodedEvmSumRSq_.store(0.0, std::memory_order_relaxed);
-                            viterbiSurvivorRawCodedEvmSumRDotD_.store(0.0, std::memory_order_relaxed);
+                            viterbiSurvivorRawCodedEvmSqEma_.store(std::numeric_limits<double>::quiet_NaN(),
+                                                                   std::memory_order_relaxed);
 
                             viterbiDesyncAlert();
                             {
@@ -1862,20 +1869,10 @@ RxStatistics Receiver::GetRxStatistics(double t_sim_optional) const
                static_cast<double>(s.viterbiSurvivorRawCodedBitsCompared))
             : std::numeric_limits<double>::quiet_NaN();
 
-    double sumRSq = viterbiSurvivorRawCodedEvmSumRSq_.load(std::memory_order_relaxed);
-    double sumRDotD = viterbiSurvivorRawCodedEvmSumRDotD_.load(std::memory_order_relaxed);
-    // Data-aided EVM invariant to arbitrary LLR scaling (like AGC fluctuations):
-    // EVM^2 = (sum(|r|^2) * sum(|d|^2)) / (sum(r.d))^2 - 1.
-    // For QPSK mapped to +/-1, sum(|d|^2) = 2 * N. Here sumRDotD accumulates (ri*ideal_i + rq*ideal_q),
-    // and sumRSq accumulates (ri^2 + rq^2). Total symbols N = viterbiSurvivorRawCodedBitsCompared / 2.
-    if (s.viterbiSurvivorRawCodedBitsCompared > 0ULL && sumRDotD > 1e-12) {
-        double N = static_cast<double>(s.viterbiSurvivorRawCodedBitsCompared) / 2.0;
-        double sumDSq = 2.0 * N;
-        double evmSq = (sumRSq * sumDSq) / (sumRDotD * sumRDotD) - 1.0;
-        if (evmSq > 0.0) {
-            s.viterbiSurvivorRawCodedEvmRms = std::sqrt(evmSq);
-            s.viterbiSurvivorRawCodedSnrDb = -10.0 * std::log10(evmSq);
-        }
+    const double evmSqEma = viterbiSurvivorRawCodedEvmSqEma_.load(std::memory_order_relaxed);
+    if (std::isfinite(evmSqEma) && evmSqEma > 0.0) {
+        s.viterbiSurvivorRawCodedEvmRms = std::sqrt(evmSqEma);
+        s.viterbiSurvivorRawCodedSnrDb = -10.0 * std::log10(evmSqEma);
     }
 
     return s;

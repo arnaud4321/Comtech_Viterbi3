@@ -64,5 +64,7 @@ public:
     ReceiverFreqCorrectorConfig CentralFreqCfg;
     PhaseTrackingConfig PhaseTrackingCfg;
     ConstellationDisplayConfig ConstellationCfg;
+    /// Viterbi survivor SNR/EVM: first-order EMA on batch @f$\mathrm{EVM}^2@f$, @f$y_k=\alpha x_k+(1-\alpha)y_{k-1}@f$ (not an infinite running sum).
+    double ViterbiSurvivorEvmEmaAlpha = 0.05;
 
 };

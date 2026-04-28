@@ -141,9 +141,9 @@ struct RxStatistics {
     /// @f$\mathrm{viterbiSurvivorRawCodedBitErrors}/\mathrm{viterbiSurvivorRawCodedBitsCompared}@f$; NaN if none.
     double viterbiSurvivorRawCodedBer = std::numeric_limits<double>::quiet_NaN();
     
-    /// RMS EVM based on the comparison of received LLRs with decoded ideal survivor path symbols.
+    /// RMS EVM from survivor path (first-order filter on batch @f$\mathrm{EVM}^2@f$, not a global cumulative average).
     double viterbiSurvivorRawCodedEvmRms = std::numeric_limits<double>::quiet_NaN();
-    /// Estimated SNR derived from the survivor path EVM RMS (dB).
+    /// Estimated SNR from that RMS EVM (dB).
     double viterbiSurvivorRawCodedSnrDb = std::numeric_limits<double>::quiet_NaN();
 };
 
@@ -250,8 +250,9 @@ private:
     std::atomic<uint64_t> viterbiRelockEvents_{0};
     std::atomic<uint64_t> viterbiSurvivorRawCodedBitErrors_{0};
     std::atomic<uint64_t> viterbiSurvivorRawCodedBitsCompared_{0};
-    std::atomic<double> viterbiSurvivorRawCodedEvmSumRSq_{0.0};
-    std::atomic<double> viterbiSurvivorRawCodedEvmSumRDotD_{0.0};
+    /// First-order filter state on @f$\mathrm{EVM}^2@f$ (each Viterbi-0 batch); NaN until the first valid batch.
+    std::atomic<double> viterbiSurvivorRawCodedEvmSqEma_{std::numeric_limits<double>::quiet_NaN()};
+    double viterbiSurvivorEvmEmaAlpha_{0.05}; ///< EMA coefficient @f$\alpha@f$ for @ref viterbiSurvivorRawCodedEvmSqEma_.
     ViterbiParameters ViterbiParams;
     unsigned char *ViterbiOutputs[3];
     unsigned char *DiffDec[3];
@@ -319,7 +320,8 @@ public:
                       double displayPeriodSec = 1.0,
                       const ReceiverFreqCorrectorConfig& centralFreqCfg = ReceiverFreqCorrectorConfig{},
                       const PhaseTrackingConfig& phaseCfg = PhaseTrackingConfig{},
-                      const ConstellationDisplayConfig& constellationCfg = ConstellationDisplayConfig{});
+                      const ConstellationDisplayConfig& constellationCfg = ConstellationDisplayConfig{},
+                      double viterbiSurvivorEvmEmaAlpha = 0.05);
 
     /** @brief Signal shutdown and join worker threads. */
     void StopThreads(void);

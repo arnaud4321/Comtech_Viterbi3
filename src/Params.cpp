@@ -75,6 +75,9 @@ void Params::ReadParams(string FileName)
     }
     RxFreq = recv.value("FreqHz", opLegacy.value("RxFreq", 2000e6));
     RxSampleRate = recv.value("SampleRate", opLegacy.value("RxSampleRate", 21.42e6));
+    ViterbiSurvivorEvmEmaAlpha = recv.value("ViterbiSurvivorEvmEmaAlpha", 0.05);
+    if (ViterbiSurvivorEvmEmaAlpha <= 0.0 || ViterbiSurvivorEvmEmaAlpha > 1.0)
+        ViterbiSurvivorEvmEmaAlpha = 0.05;
     ref = opLegacy.value("ref", sim.value("ClockReference", std::string("internal")));
 
     SamplingFrequency = RxSampleRate;
